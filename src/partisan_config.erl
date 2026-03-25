@@ -457,6 +457,7 @@ init() ->
             {causal_labels, []},
             {channel_fallback, true},
             {connect_disterl, false},
+            {connect_timeout, 5000},
             {connection_jitter, ?CONNECTION_JITTER},
             {connection_interval, 1000},
             {connection_ping, #{

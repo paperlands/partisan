@@ -50,7 +50,8 @@ init([PeerIP, PeerPort]) ->
     % Trapping exit so can close socket in terminate/2
     _ = process_flag(trap_exit, true),
     Opts = [{active, once}, {mode, binary}, {ip, PeerIP}, {packet, 4},
-            {reuseaddr, true}, {nodelay, true}, {keepalive, true}],
+            {reuseaddr, true}, {nodelay, true}, {keepalive, true}]
+            ++ tcp_keepalive_opts(),
     case gen_tcp:listen(PeerPort, Opts) of
         {ok, Socket} ->
             %% if the port is to be system allocated we need to set
@@ -86,6 +87,16 @@ terminate(_, {Socket, _MRef}) ->
     ok.
 
 %% private
+tcp_keepalive_opts() ->
+    case os:type() of
+        {unix, linux} ->
+            [{raw,6,4,<<10:32/native>>},{raw,6,5,<<5:32/native>>},{raw,6,6,<<3:32/native>>}];
+        {unix, darwin} ->
+            [{raw,6,16#10,<<10:32/native>>}];
+        _ ->
+            []
+    end.
+
 maybe_update_port_config(PeerIP, 0, Socket) ->
     case inet:sockname(Socket) of
         {ok, {_IPAddress, Port}} ->

@@ -43,7 +43,7 @@
 -type state() :: #state{}.
 
 %% Macros.
--define(TIMEOUT, 1000).
+-define(DEFAULT_CONNECT_TIMEOUT, 5000).
 
 %% API
 -export([start_link/5]).
@@ -52,6 +52,7 @@
 -export([init/1]).
 -export([handle_call/3]).
 -export([handle_cast/2]).
+-export([handle_continue/2]).
 -export([handle_info/2]).
 -export([terminate/2]).
 -export([code_change/3]).
@@ -174,7 +175,7 @@ handle_call({send_message, Msg}, _From, #state{} = State) ->
             {reply, ok, State};
         Error ->
             ?LOG_DEBUG("Message ~p failed to send: ~p", [Msg, Error]),
-            {reply, Error, State}
+            {reply, Error, State, {continue, {stop_send_failed, Error}}}
     end;
 
 handle_call(Event, _From, State) ->
@@ -199,19 +200,22 @@ handle_cast({send_message, Msg}, #state{} = State) ->
     case send_data(State#state.socket, Data) of
         ok ->
             ?LOG_TRACE("Dispatched message: ~p", [Msg]),
-            ok;
+            {noreply, State};
         Error ->
-            ?LOG_ERROR(#{
-                description => "Failed to send message",
-                data => Msg,
+            ?LOG_DEBUG(#{
+                description => "Send failed, closing connection",
                 error => Error
-            })
-    end,
-    {noreply, State};
+            }),
+            {stop, normal, State}
+    end;
 
 handle_cast(Event, State) ->
     ?LOG_WARNING(#{description => "Unhandled cast event", event => Event}),
     {noreply, State}.
+
+
+handle_continue({stop_send_failed, _}, State) ->
+    {stop, normal, State}.
 
 
 -spec handle_info(term(), state()) ->
@@ -319,12 +323,13 @@ when is_atom(Channel), is_map(ChannelOpts) ->
         {active, once},
         {packet, 4},
         {keepalive, true}
-    ],
+    ] ++ tcp_keepalive_opts(),
 
     Opts = [{monotonic, maps:get(monotonic, ChannelOpts, false)}],
 
+    Timeout = partisan_config:get(connect_timeout, ?DEFAULT_CONNECT_TIMEOUT),
     Result = partisan_peer_socket:connect(
-        Address, Port, SocketOpts, ?TIMEOUT, Opts
+        Address, Port, SocketOpts, Timeout, Opts
     ),
 
     case Result of
@@ -369,6 +374,22 @@ close_socket(undefined) ->
 
 close_socket(Socket) ->
     partisan_peer_socket:close(Socket).
+
+
+%% @private
+%% Platform-aware TCP keepalive tuning.
+%% Dead hotspot connections detected in ~30s instead of OS default (~2h).
+tcp_keepalive_opts() ->
+    case os:type() of
+        {unix, linux} ->
+            %% SOL_TCP=6: KEEPIDLE(4)=10s, KEEPINTVL(5)=5s, KEEPCNT(6)=3
+            [{raw,6,4,<<10:32/native>>},{raw,6,5,<<5:32/native>>},{raw,6,6,<<3:32/native>>}];
+        {unix, darwin} ->
+            %% TCP_KEEPALIVE=0x10 (idle interval) on macOS
+            [{raw,6,16#10,<<10:32/native>>}];
+        _ ->
+            []
+    end.
 
 
 %% @private
@@ -445,6 +466,14 @@ handle_inbound(
             peer_node => Node
         }
     ),
+    {noreply, reset_ping(State)};
+
+%% Stale pong from correct peer — connection alive, just slow.
+handle_inbound(#pong{from = Node}, #state{peer = #{name := Node}} = State) ->
+    ?LOG_DEBUG(#{
+        description => "Ignoring stale pong (superseded ping ID)",
+        peer_node => Node
+    }),
     {noreply, reset_ping(State)};
 
 handle_inbound(#pong{} = Pong, #state{} = State) ->

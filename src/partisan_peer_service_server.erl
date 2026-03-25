@@ -218,6 +218,15 @@ handle_inbound(
     ),
     {noreply, reset_ping(State)};
 
+%% Stale pong from correct peer — connection alive, just slow.
+%% Ping retry overwrote ping_id; this pong matches the old one.
+handle_inbound(#pong{from = Node}, #state{peer_node = Node} = State) ->
+    ?LOG_DEBUG(#{
+        description => "Ignoring stale pong (superseded ping ID)",
+        peer_node => Node
+    }),
+    {noreply, reset_ping(State)};
+
 handle_inbound(#pong{} = Pong, #state{} = State) ->
     {stop, {invalid_ping_response, Pong}, State};
 
