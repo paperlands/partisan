@@ -828,6 +828,15 @@ init([]) ->
 handle_call(partitions, _From, State) ->
     {reply, {ok, State#state.partitions}, State};
 
+handle_call({leave, #{name := _} = Node}, _From, #state{} = State0) ->
+    Active0 = State0#state.active,
+    Passive0 = State0#state.passive,
+    Active = sets:del_element(Node, Active0),
+    Passive = sets:del_element(Node, Passive0),
+    ok = disconnect(Node),
+    State = State0#state{active = Active, passive = Passive},
+    {reply, ok, State};
+
 handle_call({leave, _Node}, _From, State) ->
     {reply, {error, not_implemented}, State};
 

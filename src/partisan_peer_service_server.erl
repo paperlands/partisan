@@ -193,8 +193,17 @@ handle_inbound({hello, Node, Channel}, #state{} = State0) ->
 
 
 handle_inbound(#ping{from = Node} = Ping, #state{peer_node = Node} = State) ->
-    ok = send_pong(State, Ping),
-    {noreply, reset_ping(State)};
+    case send_pong(State, Ping) of
+        ok ->
+            {noreply, reset_ping(State)};
+        {error, Reason} ->
+            ?LOG_WARNING(#{
+                description => "Failed to send pong, closing connection",
+                peer_node => Node,
+                reason => Reason
+            }),
+            {stop, {shutdown, {send_error, Reason}}, State}
+    end;
 
 handle_inbound(#ping{} = Ping, #state{} = State) ->
         ?LOG_WARNING(#{
