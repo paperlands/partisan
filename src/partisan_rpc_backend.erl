@@ -83,8 +83,8 @@ handle_info({call, M, F, A, _Timeout, {origin, Caller}}, State) ->
     case partisan:forward_message(Caller, {rpc_response, Response}, Opts) of
         ok ->
             ok;
-        {error, Reason} ->
-            logger:warning("RPC response delivery failed to ~p: ~p", [Caller, Reason])
+        {error, DeliveryError} ->
+            logger:warning("RPC response delivery failed to ~p: ~p", [Caller, DeliveryError])
     end,
 
     {noreply, State};
