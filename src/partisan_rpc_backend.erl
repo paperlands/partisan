@@ -80,7 +80,12 @@ handle_info({call, M, F, A, _Timeout, {origin, Caller}}, State) ->
 
     %% Send the response to execution.
     Opts = partisan_rpc:prepare_opts(partisan_config:get(forward_options, [])),
-    ok = partisan:forward_message(Caller, {rpc_response, Response}, Opts),
+    case partisan:forward_message(Caller, {rpc_response, Response}, Opts) of
+        ok ->
+            ok;
+        {error, Reason} ->
+            logger:warning("RPC response delivery failed to ~p: ~p", [Caller, Reason])
+    end,
 
     {noreply, State};
 
