@@ -445,12 +445,13 @@ handle_inbound(
     ok = send_pong(State, Ping),
     {noreply, reset_ping(State)};
 
-handle_inbound(#ping{} = Ping, #state{} = State) ->
+handle_inbound(#ping{from = From} = _Ping, #state{peer = #{name := Expected}} = State) ->
     ?LOG_WARNING(#{
-        description => "Received invalid ping message",
-        message => Ping
+        description => "Received ping from unexpected node, closing connection",
+        expected_node => Expected,
+        actual_node => From
     }),
-    {noreply, State};
+    {stop, normal, State};
 
 handle_inbound(
     #pong{from = Node, id = Id, timestamp = Ts},
@@ -476,8 +477,13 @@ handle_inbound(#pong{from = Node}, #state{peer = #{name := Node}} = State) ->
     }),
     {noreply, reset_ping(State)};
 
-handle_inbound(#pong{} = Pong, #state{} = State) ->
-    {stop, {invalid_ping_response, Pong}, State};
+handle_inbound(#pong{from = From} = _Pong, #state{peer = #{name := Expected}} = State) ->
+    ?LOG_WARNING(#{
+        description => "Received pong from unexpected node, closing connection",
+        expected_node => Expected,
+        actual_node => From
+    }),
+    {stop, normal, State};
 
 handle_inbound(Msg, State) ->
     ?LOG_WARNING(#{

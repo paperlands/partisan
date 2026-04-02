@@ -280,6 +280,9 @@ disconnect(Nodes, Fun) when is_list(Nodes), is_function(Fun, 1) ->
                     ok
             end,
             ok = partisan_peer_connections:kill(N),
+            %% Remove ETS records immediately rather than relying on
+            %% the manager processing EXIT messages asynchronously.
+            _ = catch partisan_peer_connections:erase(N),
             catch Fun(N)
         end || N <- Nodes, N =/= Node
     ],
