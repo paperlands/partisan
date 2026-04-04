@@ -322,6 +322,10 @@ send(Transport, Socket, Data) ->
 %% after a given period with no transmissions.
 %%
 %% @private
+monotonic_should_send(_MessageQueueLen, undefined) ->
+    %% First message on this connection — no prior transmission time.
+    %% Always send to initialise the clock.
+    true;
 monotonic_should_send(MessageQueueLen, LastTransmissionTime) ->
     case MessageQueueLen > 0 of
         true ->
