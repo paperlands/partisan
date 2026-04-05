@@ -326,7 +326,8 @@ monotonic_should_send(_MessageQueueLen, undefined) ->
     %% First message on this connection — no prior transmission time.
     %% Always send to initialise the clock.
     true;
-monotonic_should_send(MessageQueueLen, LastTransmissionTime) ->
+monotonic_should_send(MessageQueueLen, LastTransmissionTime)
+  when is_integer(LastTransmissionTime) ->
     case MessageQueueLen > 0 of
         true ->
             %% Messages in queue; conditional send.
@@ -340,4 +341,8 @@ monotonic_should_send(MessageQueueLen, LastTransmissionTime) ->
         false ->
             %% No messages in queue; transmit.
             true
-    end.
+    end;
+monotonic_should_send(_MessageQueueLen, _BadValue) ->
+    %% Defensive: unexpected value in process dictionary — send to
+    %% re-initialise the clock (put/2 in send/2 overwrites with valid time).
+    true.
