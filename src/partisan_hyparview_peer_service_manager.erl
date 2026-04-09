@@ -2606,6 +2606,19 @@ is_in_active_view(Peer, Active) ->
 
 
 %% @private
+%% @doc Find a spec in a set by node name (ignoring listen_addrs).
+%% Returns `{ok, Spec}` or `none`.
+find_by_name(Name, Set) ->
+    sets:fold(
+        fun(#{name := N} = Spec, none) when N =:= Name -> {ok, Spec};
+           (_, Acc) -> Acc
+        end,
+        none,
+        Set
+    ).
+
+
+%% @private
 neighbor_acceptable(high, _, _) ->
     %% Always true.
     true;
@@ -2650,8 +2663,35 @@ merge_exchange(Exchange, #state{} = State) ->
 
 
 %% @private
-handle_update_members(Members, State) ->
-    merge_exchange(Members, State).
+%% Replace stale specs in active view when a member has the same name
+%% but different listen_addrs (WiFi roam / IP change). Without this,
+%% merge_exchange correctly skips peers already in active (by name),
+%% but the stale active entry with the old IP persists — causing
+%% reconnection attempts to unreachable addresses.
+handle_update_members(Members, #state{} = State0) ->
+    State1 = lists:foldl(
+        fun(#{name := Name, listen_addrs := NewAddrs} = NewSpec, AccState) ->
+            case find_by_name(Name, AccState#state.active) of
+                {ok, #{listen_addrs := OldAddrs} = OldSpec} when OldAddrs =/= NewAddrs ->
+                    ?LOG_INFO(
+                        "update_members: replacing stale spec for ~p: ~p -> ~p",
+                        [Name, OldAddrs, NewAddrs]
+                    ),
+                    disconnect(OldSpec),
+                    Active = sets:del_element(OldSpec, AccState#state.active),
+                    Active1 = sets:add_element(NewSpec, Active),
+                    ok = partisan_peer_service_manager:connect(NewSpec),
+                    AccState#state{active = Active1};
+                _ ->
+                    AccState
+            end;
+           (_, AccState) ->
+            AccState
+        end,
+        State0,
+        Members
+    ),
+    merge_exchange(Members, State1).
 
 
 %% @private
