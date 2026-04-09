@@ -2358,15 +2358,39 @@ add_to_active_view(#{name := Name}=Peer, Tag,
 
     ActiveMaxSize = config_get(active_max_size, State0),
     IsNotMyself = not (Name =:= partisan:node()),
-    NotInActiveView = not sets:is_element(Peer, Active0),
 
-    case IsNotMyself andalso NotInActiveView of
+    %% Name-aware dedup: if a spec for the same node name exists with
+    %% different listen_addrs (WiFi roam / IP change), remove the stale
+    %% entry so the new spec can take its place.
+    {Active1, StaleRemoved} = sets:fold(
+        fun(#{name := N} = Old, {AccSet, Removed}) when N =:= Name ->
+                case Old =:= Peer of
+                    true  -> {AccSet, Removed};
+                    false ->
+                        ?LOG_INFO(
+                            "Replacing stale spec for ~p in active view: ~p -> ~p",
+                            [Name,
+                             maps:get(listen_addrs, Old, []),
+                             maps:get(listen_addrs, Peer, [])]
+                        ),
+                        disconnect(Old),
+                        {sets:del_element(Old, AccSet), true}
+                end;
+           (_, Acc) -> Acc
+        end,
+        {Active0, false},
+        Active0
+    ),
+
+    NotInActiveView = not sets:is_element(Peer, Active1),
+
+    case IsNotMyself andalso (NotInActiveView orelse StaleRemoved) of
         true ->
             %% See above for more information.
-            Passive = remove_from_passive_view(Peer, Passive0),
-            State1 = State0#state{passive = Passive},
+            Passive = remove_from_passive_view_by_name(Name, Passive0),
+            State1 = State0#state{active = Active1, passive = Passive},
 
-            IsFull = is_full({active, Active0, Reserved0}, ActiveMaxSize),
+            IsFull = is_full({active, Active1, Reserved0}, ActiveMaxSize),
             State2 = case IsFull of
                 true ->
                     drop_random_element_from_active_view(State1);
@@ -2432,8 +2456,22 @@ add_to_passive_view(#{name := Name} = Peer, #state{} = State0) ->
 
     IsNotMyself = not (Name =:= partisan:node()),
 
-    NotInActiveView = not sets:is_element(Peer, Active0),
-    NotInPassiveView = not sets:is_element(Peer, Passive0),
+    %% Name-aware: check active view by name, not structural equality.
+    %% A spec with the same name but different listen_addrs (roamed node)
+    %% should not block passive view insertion.
+    NameInActiveView = sets:fold(
+        fun(#{name := N}, _) when N =:= Name -> true;
+           (_, Acc) -> Acc
+        end,
+        false,
+        Active0
+    ),
+    NotInActiveView = not NameInActiveView,
+
+    %% Remove any stale spec for the same name from passive view
+    %% before checking membership or inserting the new one.
+    Passive1 = remove_from_passive_view_by_name(Name, Passive0),
+    NotInPassiveView = not sets:is_element(Peer, Passive1),
 
     Allowed = IsNotMyself andalso NotInActiveView andalso NotInPassiveView,
 
@@ -2441,16 +2479,16 @@ add_to_passive_view(#{name := Name} = Peer, #state{} = State0) ->
         true ->
             PassiveMaxSize = config_get(passive_max_size, State0),
 
-            Passive1 = case is_full({passive, Passive0}, PassiveMaxSize) of
+            Passive2 = case is_full({passive, Passive1}, PassiveMaxSize) of
                 true ->
-                    Random = pick_random(Passive0, [Myself]),
-                    sets:del_element(Random, Passive0);
+                    Random = pick_random(Passive1, [Myself]),
+                    sets:del_element(Random, Passive1);
                 false ->
-                    Passive0
+                    Passive1
             end,
-            sets:add_element(Peer, Passive1);
+            sets:add_element(Peer, Passive2);
         false ->
-            Passive0
+            Passive1
     end,
 
     State = State0#state{passive = Passive},
@@ -2540,6 +2578,19 @@ remove_from_passive_view(Peer, Passive) ->
 
 
 %% @private
+%% @doc Remove all specs matching Name from the passive view, regardless
+%% of listen_addrs. Used during WiFi roaming to evict stale specs when
+%% a node re-appears with a different IP.
+remove_from_passive_view_by_name(Name, Passive) ->
+    sets:filter(
+        fun(#{name := N}) -> N =/= Name;
+           (_) -> true
+        end,
+        Passive
+    ).
+
+
+%% @private
 is_in_passive_view(Peer, Passive) ->
     sets:is_element(Peer, Passive).
 
@@ -2577,11 +2628,24 @@ neighbor_acceptable(_, Tag, #state{} = State) ->
 %% @private
 merge_exchange(Exchange, #state{} = State) ->
     %% Remove ourself and active set members from the exchange.
-    Myself = State#state.node_spec,
+    %% Use name-aware filtering instead of structural equality (--).
+    %% This ensures a roamed node (same name, different listen_addrs)
+    %% in the exchange doesn't bypass the active view check.
+    MyName = maps:get(name, State#state.node_spec),
     Active = State#state.active,
-    ToAdd = lists:usort(Exchange -- ([Myself] ++ members(Active))),
+    ActiveNames = sets:fold(
+        fun(#{name := N}, Acc) -> sets:add_element(N, Acc) end,
+        sets:new(),
+        Active
+    ),
+    ToAdd = lists:filter(
+        fun(#{name := N}) ->
+            N =/= MyName andalso not sets:is_element(N, ActiveNames)
+        end,
+        lists:usort(Exchange)
+    ),
 
-    %% Add to passive view.
+    %% Add to passive view (add_to_passive_view handles name-aware dedup).
     lists:foldl(fun(X, P) -> add_to_passive_view(X, P) end, State, ToAdd).
 
 
