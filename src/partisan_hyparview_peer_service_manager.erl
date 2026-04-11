@@ -1124,6 +1124,19 @@ handle_info(random_promotion, State0) ->
             State0;
         false ->
             Peer = pick_random(Passive, [Myself]),
+            %% [LC] Log which passive-view spec is being promoted —
+            %%      this is where stale listen_addrs from shuffles get dialed.
+            case Peer of
+                undefined ->
+                    ?LOG_INFO("[LC] random_promotion passive=empty", []);
+                #{name := PN, listen_addrs := PA} ->
+                    ?LOG_INFO(
+                        "[LC] random_promotion pick=~p addrs=~p",
+                        [PN, PA]
+                    );
+                Other ->
+                    ?LOG_INFO("[LC] random_promotion pick=~p", [Other])
+            end,
             promote_peer(Peer, State0)
     end,
 
@@ -2726,12 +2739,21 @@ merge_exchange(Exchange, #state{} = State) ->
 %% but the stale active entry with the old IP persists — causing
 %% reconnection attempts to unreachable addresses.
 handle_update_members(Members, #state{} = State0) ->
+    %% [LC] Log entry point and what members arrived
+    Summary = [
+        case M of
+            #{name := N, listen_addrs := A} -> {N, A};
+            _ -> M
+        end || M <- Members
+    ],
+    ?LOG_INFO("[LC] handle_update_members recv=~p", [Summary]),
+
     State1 = lists:foldl(
         fun(#{name := Name, listen_addrs := NewAddrs} = NewSpec, AccState) ->
             case find_by_name(Name, AccState#state.active) of
                 {ok, #{listen_addrs := OldAddrs} = OldSpec} when OldAddrs =/= NewAddrs ->
                     ?LOG_INFO(
-                        "update_members: replacing stale spec for ~p: ~p -> ~p",
+                        "[LC] update_members REPLACE ~p: ~p -> ~p",
                         [Name, OldAddrs, NewAddrs]
                     ),
                     disconnect(OldSpec),
@@ -2739,7 +2761,17 @@ handle_update_members(Members, #state{} = State0) ->
                     Active1 = sets:add_element(NewSpec, Active),
                     ok = partisan_peer_service_manager:connect(NewSpec),
                     AccState#state{active = Active1};
+                {ok, _Same} ->
+                    ?LOG_INFO(
+                        "[LC] update_members NOOP-active ~p (addrs match)",
+                        [Name]
+                    ),
+                    AccState;
                 _ ->
+                    ?LOG_INFO(
+                        "[LC] update_members NOT-IN-ACTIVE ~p (spec_addrs=~p)",
+                        [Name, NewAddrs]
+                    ),
                     AccState
             end;
            (_, AccState) ->

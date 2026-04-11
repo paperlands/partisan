@@ -361,6 +361,12 @@ maybe_connect(#{name := Node} = NodeSpec, ListenAddr, Acc) ->
             error -> partisan_config:channels()
         end,
 
+    %% [LC] Trace every connect attempt — what spec + addr are we dialing?
+    ?LOG_INFO(
+        "[LC] maybe_connect target=~p listen_addr=~p spec_addrs=~p",
+        [Node, ListenAddr, maps:get(listen_addrs, NodeSpec, [])]
+    ),
+
     %% We check count using Node and not NodeSpec cause it is much faster and
     %% we are only interested in knowing if we have at least one connection
     %% even if this was a stale NodeSpec.
@@ -388,30 +394,31 @@ maybe_connect(#{name := Node} = NodeSpec, ListenAddr, Acc) ->
 
             case Result of
                 {ok, Pid} ->
-                    ?LOG_DEBUG("Node ~p connected, pid: ~p", [NodeSpec, Pid]),
+                    ?LOG_INFO(
+                        "[LC] maybe_connect OK target=~p listen_addr=~p pid=~p",
+                        [Node, ListenAddr, Pid]
+                    ),
                     ok = partisan_peer_connections:store(
                         NodeSpec, Pid, Channel, ListenAddr
                     ),
                     Acc;
                 ignore ->
-                    ?LOG_DEBUG(#{
-                        description => "Node failed connection.",
-                        node_spec => NodeSpec,
-                        reason => ignore
-                    }),
+                    ?LOG_INFO(
+                        "[LC] maybe_connect IGNORE target=~p listen_addr=~p",
+                        [Node, ListenAddr]
+                    ),
                     Acc;
                 {error, normal} ->
-                    ?LOG_DEBUG(#{
-                        description => "Node isn't online just yet.",
-                        node_spec => NodeSpec
-                    }),
+                    ?LOG_INFO(
+                        "[LC] maybe_connect NOT-ONLINE target=~p listen_addr=~p",
+                        [Node, ListenAddr]
+                    ),
                     Acc;
                 {error, Reason} ->
-                    ?LOG_DEBUG(#{
-                        description => "Node failed connection.",
-                        node_spec => NodeSpec,
-                        reason => Reason
-                    }),
+                    ?LOG_INFO(
+                        "[LC] maybe_connect FAIL target=~p listen_addr=~p reason=~p",
+                        [Node, ListenAddr, Reason]
+                    ),
                     Acc
             end;
         _ ->
