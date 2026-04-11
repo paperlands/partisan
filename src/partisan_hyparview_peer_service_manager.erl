@@ -828,17 +828,74 @@ init([]) ->
 handle_call(partitions, _From, State) ->
     {reply, {ok, State#state.partitions}, State};
 
-handle_call({leave, #{name := _} = Node}, _From, #state{} = State0) ->
+handle_call({leave, #{name := Name} = Node}, _From, #state{} = State0) ->
     Active0 = State0#state.active,
     Passive0 = State0#state.passive,
-    Active = sets:del_element(Node, Active0),
-    Passive = sets:del_element(Node, Passive0),
+    %% Name-aware removal — handles specs with stale listen_addrs after
+    %% WiFi roaming / IP change. sets:del_element uses structural equality
+    %% which fails to match when listen_addrs differ.
+    Active = sets:filter(
+        fun(#{name := N}) -> N =/= Name;
+           (_) -> true
+        end, Active0),
+    Passive = sets:filter(
+        fun(#{name := N}) -> N =/= Name;
+           (_) -> true
+        end, Passive0),
     ok = disconnect(Node),
     State = State0#state{active = Active, passive = Passive},
     {reply, ok, State};
 
 handle_call({leave, _Node}, _From, State) ->
     {reply, {error, not_implemented}, State};
+
+handle_call(refresh_node_spec, _From, #state{} = State0) ->
+    %% Re-read node_spec from partisan_config after a network change.
+    %%
+    %% init/1 caches partisan:node_spec() in State#state.node_spec once at
+    %% boot and never updates it. That cached value is used as `Myself' in
+    %% every outgoing JOIN, NEIGHBOR, FORWARD_JOIN and SHUFFLE message (see
+    %% do_send_message/2 call sites), and it is also the self element in
+    %% the active view set (added in init/1 at Active = sets:add_element).
+    %%
+    %% Without refreshing both the state field AND the active-view self
+    %% entry after a roam:
+    %%   1. Our outgoing JOIN carries stale listen_addrs
+    %%   2. Peers call connect(OurStaleSpec), dial our dead IPs, fail
+    %%   3. is_connected(us) on their side stays false
+    %%   4. We are never added to their active view, no NEIGHBOR comes
+    %%      back, and they never create the reverse outbound connection
+    %%      that partisan_peer_connections needs for dispatch_pid/1
+    %%   5. Phoenix.PubSub broadcast + Phoenix.Tracker direct_broadcast
+    %%      silently fail by name → presence never re-converges.
+    %%
+    %% Shuffles additionally leak the stale spec into peers' passive views,
+    %% where random_promotion keeps picking it and dialing dead IPs forever.
+    OldSpec = State0#state.node_spec,
+    NewSpec = partisan:node_spec(),
+    case OldSpec =:= NewSpec of
+        true ->
+            {reply, unchanged, State0};
+        false ->
+            #{name := Name} = NewSpec,
+            ?LOG_INFO(#{
+                description => "Refreshing node_spec after network change",
+                old_listen_addrs => maps:get(listen_addrs, OldSpec, []),
+                new_listen_addrs => maps:get(listen_addrs, NewSpec, [])
+            }),
+            %% Replace self entry in the active view. init/1 seeded it
+            %% with the boot-time spec and nothing else ever updates it.
+            %% Use name-aware filter because sets:del_element uses
+            %% structural equality and won't match the old spec otherwise.
+            Active0 = State0#state.active,
+            Active1 = sets:filter(
+                fun(#{name := N}) -> N =/= Name;
+                   (_) -> true
+                end, Active0),
+            Active = sets:add_element(NewSpec, Active1),
+            State = State0#state{node_spec = NewSpec, active = Active},
+            {reply, updated, State}
+    end;
 
 handle_call({join, #{name := _Name} = Node}, _From, State) ->
     gen_server:cast(?MODULE, {join, Node}),

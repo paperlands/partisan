@@ -97,8 +97,19 @@ when ?DATA_MSG(Tag) ->
     Msg = binary_to_term(Data),
     ?LOG_TRACE("Received data from socket: ~p", [Msg]),
     ok = maybe_delay(),
-    ok = reset_socket_opts(State),
-    handle_inbound(Msg, State);
+    case reset_socket_opts(State) of
+        ok ->
+            handle_inbound(Msg, State);
+        {error, Reason} ->
+            %% Socket invalidated (e.g., acceptor pool restart during IP
+            %% change). Stop gracefully instead of crashing with MatchError.
+            ?LOG_DEBUG(#{
+                description => "Socket invalid, stopping server",
+                socket => State#state.socket,
+                reason => Reason
+            }),
+            {stop, normal, State}
+    end;
 
 handle_info({Tag, _RawSocket, Reason}, #state{} = State)
 when ?ERROR_MSG(Tag) ->
