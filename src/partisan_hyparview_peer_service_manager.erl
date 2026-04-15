@@ -844,6 +844,7 @@ handle_call({leave, #{name := Name} = Node}, _From, #state{} = State0) ->
         end, Passive0),
     ok = disconnect(Node),
     State = State0#state{active = Active, passive = Passive},
+    notify(State),
     {reply, ok, State};
 
 handle_call({leave, _Node}, _From, State) ->
@@ -2746,13 +2747,13 @@ handle_update_members(Members, #state{} = State0) ->
             _ -> M
         end || M <- Members
     ],
-    ?LOG_INFO("[LC] handle_update_members recv=~p", [Summary]),
+    ?LOG_DEBUG("[LC] handle_update_members recv=~p", [Summary]),
 
     State1 = lists:foldl(
         fun(#{name := Name, listen_addrs := NewAddrs} = NewSpec, AccState) ->
             case find_by_name(Name, AccState#state.active) of
                 {ok, #{listen_addrs := OldAddrs} = OldSpec} when OldAddrs =/= NewAddrs ->
-                    ?LOG_INFO(
+                    ?LOG_DEBUG(
                         "[LC] update_members REPLACE ~p: ~p -> ~p",
                         [Name, OldAddrs, NewAddrs]
                     ),
@@ -2762,13 +2763,13 @@ handle_update_members(Members, #state{} = State0) ->
                     ok = partisan_peer_service_manager:connect(NewSpec),
                     AccState#state{active = Active1};
                 {ok, _Same} ->
-                    ?LOG_INFO(
+                    ?LOG_DEBUG(
                         "[LC] update_members NOOP-active ~p (addrs match)",
                         [Name]
                     ),
                     AccState;
                 _ ->
-                    ?LOG_INFO(
+                    ?LOG_DEBUG(
                         "[LC] update_members NOT-IN-ACTIVE ~p (spec_addrs=~p)",
                         [Name, NewAddrs]
                     ),
