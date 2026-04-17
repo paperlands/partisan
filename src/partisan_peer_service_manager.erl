@@ -362,7 +362,7 @@ maybe_connect(#{name := Node} = NodeSpec, ListenAddr, Acc) ->
         end,
 
     %% [LC] Trace every connect attempt — what spec + addr are we dialing?
-    ?LOG_INFO(
+    ?LOG_DEBUG(
         "[LC] maybe_connect target=~p listen_addr=~p spec_addrs=~p",
         [Node, ListenAddr, maps:get(listen_addrs, NodeSpec, [])]
     ),
@@ -394,7 +394,7 @@ maybe_connect(#{name := Node} = NodeSpec, ListenAddr, Acc) ->
 
             case Result of
                 {ok, Pid} ->
-                    ?LOG_INFO(
+                    ?LOG_DEBUG(
                         "[LC] maybe_connect OK target=~p listen_addr=~p pid=~p",
                         [Node, ListenAddr, Pid]
                     ),
@@ -403,19 +403,19 @@ maybe_connect(#{name := Node} = NodeSpec, ListenAddr, Acc) ->
                     ),
                     Acc;
                 ignore ->
-                    ?LOG_INFO(
+                    ?LOG_DEBUG(
                         "[LC] maybe_connect IGNORE target=~p listen_addr=~p",
                         [Node, ListenAddr]
                     ),
                     Acc;
                 {error, normal} ->
-                    ?LOG_INFO(
+                    ?LOG_DEBUG(
                         "[LC] maybe_connect NOT-ONLINE target=~p listen_addr=~p",
                         [Node, ListenAddr]
                     ),
                     Acc;
                 {error, Reason} ->
-                    ?LOG_INFO(
+                    ?LOG_DEBUG(
                         "[LC] maybe_connect FAIL target=~p listen_addr=~p reason=~p",
                         [Node, ListenAddr, Reason]
                     ),
@@ -578,7 +578,7 @@ maybe_stale(NodeSpec, Channel, ListenAddr, Acc, 0, Reason) ->
                         false ->
                             %% IP has changed
                             %% We add it to the invalid list
-                            ?LOG_INFO(#{
+                            ?LOG_DEBUG(#{
                                 description =>
                                     "Flagging node specification to be pruned",
                                 reason => duplicate,
@@ -659,7 +659,7 @@ do_deliver(ServerRef, Message) ->
             ok
     catch
         error:badarg ->
-            ?LOG_INFO(#{
+            ?LOG_DEBUG(#{
                 description => "unknown destination, dropping message",
                 to => ServerRef,
                 message => Message

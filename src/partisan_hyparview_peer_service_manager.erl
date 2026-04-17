@@ -1125,20 +1125,37 @@ handle_info(random_promotion, State0) ->
             State0;
         false ->
             Peer = pick_random(Passive, [Myself]),
-            %% [LC] Log which passive-view spec is being promoted —
-            %%      this is where stale listen_addrs from shuffles get dialed.
             case Peer of
                 undefined ->
-                    ?LOG_INFO("[LC] random_promotion passive=empty", []);
+                    State0;
                 #{name := PN, listen_addrs := PA} ->
-                    ?LOG_INFO(
-                        "[LC] random_promotion pick=~p addrs=~p",
+                    ?LOG_DEBUG(
+                        "[LC:HyParView] random_promotion pick=~p addrs=~p",
                         [PN, PA]
-                    );
-                Other ->
-                    ?LOG_INFO("[LC] random_promotion pick=~p", [Other])
-            end,
-            promote_peer(Peer, State0)
+                    ),
+                    State1 = promote_peer(Peer, State0),
+                    %% Evict from passive view if promotion failed to connect.
+                    %% Without this, unreachable peers stay in the passive view
+                    %% forever — random_promotion picks them every 5s, connect
+                    %% times out, no EXIT fires (no process was created), and
+                    %% the peer is retried indefinitely.
+                    case partisan_peer_connections:count(PN) of
+                        0 ->
+                            ?LOG_DEBUG(
+                                "[LC:HyParView] random_promotion EVICT ~p"
+                                " — no connection after promote",
+                                [PN]
+                            ),
+                            Passive1 = remove_from_passive_view(
+                                Peer, State1#state.passive
+                            ),
+                            State1#state{passive = Passive1};
+                        _ ->
+                            State1
+                    end;
+                _Other ->
+                    promote_peer(Peer, State0)
+            end
     end,
 
     %% Schedule periodic random promotion.
@@ -2747,14 +2764,14 @@ handle_update_members(Members, #state{} = State0) ->
             _ -> M
         end || M <- Members
     ],
-    ?LOG_DEBUG("[LC] handle_update_members recv=~p", [Summary]),
+    ?LOG_DEBUG("[LC:HyParView] handle_update_members recv=~p", [Summary]),
 
     State1 = lists:foldl(
         fun(#{name := Name, listen_addrs := NewAddrs} = NewSpec, AccState) ->
             case find_by_name(Name, AccState#state.active) of
                 {ok, #{listen_addrs := OldAddrs} = OldSpec} when OldAddrs =/= NewAddrs ->
                     ?LOG_DEBUG(
-                        "[LC] update_members REPLACE ~p: ~p -> ~p",
+                        "[LC:HyParView] update_members REPLACE ~p: ~p -> ~p",
                         [Name, OldAddrs, NewAddrs]
                     ),
                     disconnect(OldSpec),
@@ -2764,13 +2781,13 @@ handle_update_members(Members, #state{} = State0) ->
                     AccState#state{active = Active1};
                 {ok, _Same} ->
                     ?LOG_DEBUG(
-                        "[LC] update_members NOOP-active ~p (addrs match)",
+                        "[LC:HyParView] update_members NOOP-active ~p (addrs match)",
                         [Name]
                     ),
                     AccState;
                 _ ->
                     ?LOG_DEBUG(
-                        "[LC] update_members NOT-IN-ACTIVE ~p (spec_addrs=~p)",
+                        "[LC:HyParView] update_members NOT-IN-ACTIVE ~p (spec_addrs=~p)",
                         [Name, NewAddrs]
                     ),
                     AccState
