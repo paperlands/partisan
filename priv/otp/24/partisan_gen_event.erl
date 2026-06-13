@@ -461,7 +461,7 @@ system_terminate(Reason, Parent, _Debug, [ServerName, MSL, _HibernateAfterTimeou
 %% which module should be changed.
 %%-----------------------------------------------------------------
 system_code_change([ServerName, MSL, HibernateAfterTimeout, Hib], Module, OldVsn, Extra) ->
-    MSL1 = lists:zf(fun(H) when H#handler.module =:= Module ->
+    MSL1 = lists:filtermap(fun(H) when H#handler.module =:= Module ->
                 {ok, NewState} =
                 Module:code_change(OldVsn,
                            H#handler.state, Extra),
