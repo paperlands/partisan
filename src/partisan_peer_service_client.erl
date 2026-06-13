@@ -237,7 +237,7 @@ handle_info({Tag, _Socket}, #state{} = State) when ?CLOSED_MSG(Tag) ->
 
 handle_info(
     {timeout, Ref, ping_idle_timeout}, #state{ping_tref = Ref} = State) ->
-    ?LOG_INFO(#{
+    ?LOG_DEBUG(#{
         description => "Connection idle, sending ping",
         peer => State#state.peer,
         channel => State#state.channel,

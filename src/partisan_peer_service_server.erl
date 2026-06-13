@@ -134,7 +134,7 @@ handle_info({'DOWN', MRef, port, _, _}, #state{ref=MRef} = State) ->
 
 handle_info(
     {timeout, Ref, ping_idle_timeout}, #state{ping_tref = Ref} = State) ->
-    ?LOG_INFO(#{
+    ?LOG_DEBUG(#{
         description => "Connection idle, sending ping",
         peer_node => State#state.peer_node,
         channel => State#state.channel,
