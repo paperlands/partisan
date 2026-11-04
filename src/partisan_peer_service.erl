@@ -150,7 +150,7 @@ sync_join(#{name := Node} = NodeSpec) ->
 %% @doc Leave the cluster.
 %% @end
 %% -----------------------------------------------------------------------------
--spec leave() -> ok.
+-spec leave() -> ok | {error, term()}.
 
 leave() ->
     ?PEER_SERVICE_MANAGER:leave().
@@ -159,7 +159,7 @@ leave() ->
 %% @doc Remove a node from the cluster.
 %% @end
 %% -----------------------------------------------------------------------------
--spec leave(partisan:node_spec()) -> ok.
+-spec leave(partisan:node_spec()) -> ok | {error, term()}.
 
 leave(#{name := Node} = NodeSpec) ->
     case partisan:node() of

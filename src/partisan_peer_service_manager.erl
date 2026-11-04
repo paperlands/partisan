@@ -141,7 +141,7 @@
 
 -callback sync_join(partisan:node_spec()) -> ok | {error, not_implemented}.
 
--callback leave() -> ok.
+-callback leave() -> ok | {error, not_implemented}.
 
 -callback leave(partisan:node_spec()) -> ok | {error, not_implemented}.
 
