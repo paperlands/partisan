@@ -567,6 +567,9 @@ leave(Node) ->
 %% @doc Reserve a slot for the particular tag.
 %% @end
 %% -----------------------------------------------------------------------------
+reserve(undefined) ->
+    %% `undefined' is the empty-slot marker.
+    {error, badarg};
 reserve(Tag) ->
     gen_server:call(?MODULE, {reserve, Tag}, infinity).
 
@@ -1060,8 +1063,6 @@ handle_info({'EXIT', Pid, Reason}, State0) when is_pid(Pid) ->
     }),
 
     Myself = State0#state.node_spec,
-    Active0 = State0#state.active,
-    Passive0 = State0#state.passive,
 
     %% Prune active connections from map.
     try partisan_peer_connections:prune(Pid, Reason) of
@@ -1070,44 +1071,15 @@ handle_info({'EXIT', Pid, Reason}, State0) when is_pid(Pid) ->
             %% An established connection died. A failed connection attempt
             %% never gets here, as proc_lib flushes the 'EXIT' of a process
             %% that fails to start; promote_peer/2 handles that case.
-            Passive =
-                case is_in_passive_view(Peer, Passive0) of
-                    true ->
-                        remove_from_passive_view(Peer, Passive0);
-                    false ->
-                        Passive0
-                end,
-
-            %% Leitao et al., DSN'07, §4.3: a failed active peer is removed and
-            %% a passive peer is promoted in its place.
-            {Active, RemovedFromActive} =
-                case is_in_active_view(Peer, Active0) of
-                    true ->
-                        {remove_from_active_view(Peer, Active0), true};
-                    false ->
-                        {Active0, false}
-                end,
-
-            State =
-                case RemovedFromActive of
-                    true ->
-                        RandomPeer = pick_random(Passive, [Myself]),
-                        promote_peer(
-                            RandomPeer, State0#state{
-                                active = Active, passive = Passive
-                            }
-                        );
-                    false ->
-                        State0#state{active = Active, passive = Passive}
-                end,
-
-            ?LOG_DEBUG(#{
-                description => "Active view",
-                node_spec => Myself,
-                active_view => members(State)
-            }),
-
-            {noreply, State}
+            %% The record may name a pre-roam spec. Remove by name once the last
+            %% connection is gone; a non-last exit leaves the peer in place.
+            PeerName = maps:get(name, Peer),
+            case partisan_peer_connections:count(PeerName) =:= 0 of
+                false ->
+                    {noreply, State0};
+                true ->
+                    exit_peer(PeerName, Peer, Myself, State0)
+            end
     catch
         error:badarg ->
             {noreply, State0}
@@ -1309,7 +1281,11 @@ handle_message(
                         %% kept open for it, so `is_connected/1' here is not a
                         %% transient race — it is the steady state, and every
                         %% periodic re-assertion hit this branch and did nothing.
-                        tell_peer_to_drop_us(Peer, State0)
+                        %% A live same-name peer makes this a replay; keep it.
+                        case same_name_held(maps:get(name, Peer), State0) of
+                            true -> State0;
+                            false -> tell_peer_to_drop_us(Peer, State0)
+                        end
                 end;
             false ->
                 State0
@@ -2392,16 +2368,88 @@ select_peers_for_exchange(#state{} = State) ->
 %% network delay; if so, we have to remove this element from the passive
 %% view, otherwise it will exist in both places.
 %%
-add_to_active_view(
-    #{name := Name} = Peer,
-    Tag,
+add_to_active_view(Peer, Tag, State0) ->
+    admit(Peer, Tag, allow_eviction, State0).
+
+%% @private
+%% One admission path. `neighbor` may not evict; join may. Exact spec: no-op.
+%% Same-name: replace only if the incumbent has no reachable address. Full:
+%% evict or refuse.
+admit(Peer, Tag, Policy, State0) ->
+    case sets:is_element(Peer, State0#state.active) of
+        true ->
+            State0;
+        false ->
+            admit_unheld(Peer, Tag, Policy, State0)
+    end.
+
+%% @private
+admit_unheld(#{name := Name} = Peer, Tag, Policy, State0) ->
+    case Name =:= partisan:node() of
+        true ->
+            State0;
+        false ->
+            SameName = same_name_held(Name, State0),
+            Replaceable = SameName andalso replaceable(Peer, Name, State0),
+            case SameName andalso not Replaceable of
+                true ->
+                    %% A reachable same-name spec holds the name; this
+                    %% candidate cannot be ordered ahead of it.
+                    State0;
+                false ->
+                    ActiveMaxSize = config_get(active_max_size, State0),
+                    Candidate = supersede_same_name(Peer, Tag, State0),
+                    Full = is_full(
+                        {active, Candidate#state.active, Candidate#state.reserved},
+                        ActiveMaxSize,
+                        Tag
+                    ),
+                    case {Full, Policy} of
+                        {true, no_eviction} when not SameName ->
+                            %% We cannot hold this peer; tell it to drop us.
+                            tell_peer_to_drop_us(Peer, State0);
+                        {true, no_eviction} ->
+                            %% Asking it to drop us while keeping its predecessor
+                            %% is a worse asymmetry; stay quiet.
+                            State0;
+                        _ ->
+                            do_add_to_active_view(Peer, Tag, Candidate)
+                    end
+            end
+    end.
+
+%% @private
+%% Replaceable: the incoming spec is reachable and no same-name spec is.
+replaceable(Peer, Name, #state{active = Active}) ->
+    partisan_peer_connections:is_connected(Peer) andalso
+        case sets:size(remove_by_name(Name, Active)) < sets:size(Active) of
+            false ->
+                true;
+            true ->
+                not same_name_connected(Name, Active)
+        end.
+
+%% @private
+same_name_connected(Name, Active) ->
+    lists:any(
+        fun(#{name := N} = Spec) ->
+            N =:= Name andalso partisan_peer_connections:is_connected(Spec)
+        end,
+        sets:to_list(Active)
+    ).
+
+%% @private
+same_name_held(Name, #state{active = Active}) ->
+    sets:size(remove_by_name(Name, Active)) < sets:size(Active).
+
+%% @private
+do_add_to_active_view(#{name := Name} = Peer, Tag, State0) ->
     #state{
         active = Active0,
         node_spec = Myself,
         passive = Passive0,
         reserved = Reserved0
-    } = State0
-) ->
+    } = State0,
     ActiveMaxSize = config_get(active_max_size, State0),
     IsNotMyself = not (Name =:= partisan:node()),
     NotInActiveView = not sets:is_element(Peer, Active0),
@@ -2412,57 +2460,67 @@ add_to_active_view(
             Passive = remove_from_passive_view(Peer, Passive0),
             State1 = State0#state{passive = Passive},
 
-            IsFull = is_full({active, Active0, Reserved0}, ActiveMaxSize),
-            State2 =
-                case IsFull of
-                    true ->
-                        drop_random_element_from_active_view(State1);
-                    false ->
-                        State1
-                end,
-
-            ?LOG_DEBUG(
-                "Node ~p adds ~p to active view with tag ~p",
-                [Myself, Peer, Tag]
+            IsFull = is_full(
+                {active, Active0, Reserved0}, ActiveMaxSize, Tag
             ),
+            State2 = make_room(IsFull, State1, Active0),
+            case State2 of
+                no_room ->
+                    %% Hard bound: refuse rather than exceed active_max_size.
+                    State0;
+                _ ->
+                    ?LOG_DEBUG(
+                        "Node ~p adds ~p to active view with tag ~p",
+                        [Myself, Peer, Tag]
+                    ),
 
-            %% Add to the active view.
-            Active = sets:add_element(Peer, State2#state.active),
+                    Active = sets:add_element(Peer, State2#state.active),
 
-            %% Fill reserved slot if necessary.
-            Reserved =
-                case maps:find(Tag, Reserved0) of
-                    {ok, undefined} ->
-                        ?LOG_DEBUG(#{
-                            description => "Node added to reserved slot!"
-                        }),
-                        maps:put(Tag, Peer, Reserved0);
-                    {ok, _} ->
-                        %% Slot already filled, treat this as a normal peer.
-                        ?LOG_DEBUG(#{
-                            description =>
-                                "Node added to active view, "
-                                "but reserved slot already full!"
-                        }),
-                        Reserved0;
-                    error ->
-                        ?LOG_DEBUG("Tag is not reserved: ~p ~p", [
-                            Tag, Reserved0
-                        ]),
-                        Reserved0
-                end,
+                    Reserved =
+                        case maps:find(Tag, Reserved0) of
+                            {ok, undefined} ->
+                                ?LOG_DEBUG(#{
+                                    description => "Node added to reserved slot!"
+                                }),
+                                maps:put(Tag, Peer, Reserved0);
+                            {ok, _} ->
+                                %% Slot already filled.
+                                ?LOG_DEBUG(#{
+                                    description =>
+                                        "Node added to active view, "
+                                        "but reserved slot already full!"
+                                }),
+                                Reserved0;
+                            error ->
+                                ?LOG_DEBUG("Tag is not reserved: ~p ~p", [
+                                    Tag, Reserved0
+                                ]),
+                                Reserved0
+                        end,
 
-            State = State2#state{
-                active = Active,
-                passive = Passive,
-                reserved = Reserved
-            },
+                    State = State2#state{
+                        active = Active,
+                        passive = Passive,
+                        reserved = Reserved
+                    },
 
-            persist_epoch(State#state.epoch),
+                    persist_epoch(State#state.epoch),
 
-            State;
+                    State
+            end;
         false ->
             State0
+    end.
+
+%% @private
+%% `no_room` means nothing can be displaced; do not insert.
+make_room(false, State, _Active0) ->
+    State;
+make_room(true, State, Active0) ->
+    Dropped = drop_random_element_from_active_view(State),
+    case sets:size(Dropped#state.active) < sets:size(Active0) of
+        true -> Dropped;
+        false -> no_room
     end.
 
 %% -----------------------------------------------------------------------------
@@ -2482,23 +2540,8 @@ add_to_active_view(
 %% paths) which DOES evict to make room.
 %% @end
 %% -----------------------------------------------------------------------------
-add_to_active_view_or_reject(
-    Peer,
-    Tag,
-    #state{active = Active0, reserved = Reserved0} = State0
-) ->
-    case sets:is_element(Peer, Active0) of
-        true ->
-            State0;
-        false ->
-            ActiveMaxSize = config_get(active_max_size, State0),
-            case is_full({active, Active0, Reserved0}, ActiveMaxSize) of
-                false ->
-                    add_to_active_view(Peer, Tag, State0);
-                true ->
-                    tell_peer_to_drop_us(Peer, State0)
-            end
-    end.
+add_to_active_view_or_reject(Peer, Tag, State0) ->
+    admit(Peer, Tag, no_eviction, State0).
 
 %% -----------------------------------------------------------------------------
 %% @private
@@ -2565,10 +2608,16 @@ add_to_passive_view(#{name := Name} = Peer, #state{} = State0) ->
 
 %% @private
 is_full({active, Active, Reserved}, MaxSize) ->
-    %% Find the slots that are reserved, but not filled.
+    is_full({active, Active, Reserved}, MaxSize, undefined);
+is_full({passive, Passive}, MaxSize) ->
+    sets:size(Passive) >= MaxSize.
+
+%% @private
+is_full({active, Active, Reserved}, MaxSize, IncomingTag) ->
+    %% The incoming tag's own reservation is capacity, not competition.
     Open = maps:fold(
         fun
-            (Key, undefined, Acc) ->
+            (Key, undefined, Acc) when Key =/= IncomingTag ->
                 [Key | Acc];
             (_, _, Acc) ->
                 Acc
@@ -2576,9 +2625,7 @@ is_full({active, Active, Reserved}, MaxSize) ->
         [],
         Reserved
     ),
-    sets:size(Active) + length(Open) >= MaxSize;
-is_full({passive, Passive}, MaxSize) ->
-    sets:size(Passive) >= MaxSize.
+    sets:size(Active) + length(Open) >= MaxSize.
 
 %% -----------------------------------------------------------------------------
 %% @private
@@ -2726,6 +2773,59 @@ do_leave_named(Name, #state{reserved = Reserved0} = State0) ->
     %% Local eviction only: keep anti-replay entries so delayed messages stay fenced.
     _ = partisan_peer_service_manager:disconnect([Name], fun(_) -> ok end),
     {ok, State}.
+
+%% @private
+%% @doc Replace same-name specs with `Peer', only if `Peer' is reachable and no
+%% same-name spec is.
+%%
+%% Reachability is the only order the wire gives: a replay fails to connect and
+%% cannot displace a live spec. The old reservation is emptied, not deleted;
+%% ownership follows the tag. At capacity, refusal or third-party eviction is the
+%% caller's policy, not an accounting bug.
+supersede_same_name(#{name := Name} = Peer, Tag, #state{} = State0) ->
+    %% Replace only what is dead (D068.4, narrowed by spike F1b). Two specs of one
+    %% name can both be reachable — a multi-homed host, or a widened address set —
+    %% and then nothing in the message orders them: a replayed old advertisement
+    %% flipped the active view back and forth in F1b. So a connected outgoing spec
+    %% keeps its place. The cost is bounded and visible: a peer keeps dialling an
+    %% address that still answers, until that path dies and eviction hands the slot
+    %% to the newer spec. A revision token in the spec map would lift the
+    %% restriction; it is not worth changing every structural comparison for a case
+    %% where the stale address is still reachable.
+    case replaceable(Peer, Name, State0) of
+        false ->
+            State0;
+        true ->
+            ?LOG_DEBUG(#{
+                description => "Superseding specification for node",
+                node => Name,
+                superseded_listen_addrs => [
+                    maps:get(listen_addrs, S, [])
+                 || S <- sets:to_list(State0#state.active),
+                    maps:get(name, S) =:= Name
+                ],
+                incoming_listen_addrs => maps:get(listen_addrs, Peer, [])
+            }),
+            State0#state{
+                active = remove_by_name(Name, State0#state.active),
+                passive = remove_by_name(Name, State0#state.passive),
+                reserved = maps:map(
+                    fun
+                        (Key, #{name := N}) when N =:= Name ->
+                            %% Ownership follows the tag, not the name: a peer
+                            %% that changed tags is not entitled to the slot its
+                            %% predecessor held.
+                            case Key =:= Tag of
+                                true -> Peer;
+                                false -> undefined
+                            end;
+                        (_, Value) ->
+                            Value
+                    end,
+                    State0#state.reserved
+                )
+            }
+    end.
 
 %% @private
 same_set(A, B) ->
@@ -2896,6 +2996,37 @@ is_addable(PeerEpoch, Peer, SentMessageMap) ->
     end.
 
 %% @private
+%% The last connection to a peer is gone: it cannot be held any more.
+%%
+%% Removal is by name because the record may still name a spec from before a
+%% roam, and it must not leave a live entry behind. The reservation the peer
+%% occupied is emptied rather than deleted: it is a slot, and `is_full/2' counts
+%% it. Membership is published only when the active view actually changed, so a
+%% passive-only or bookkeeping change does not churn the snapshot.
+exit_peer(PeerName, _Peer, Myself, #state{} = State0) ->
+    Active0 = State0#state.active,
+    Active = remove_by_name(PeerName, Active0),
+    Passive = remove_by_name(PeerName, State0#state.passive),
+    Reserved = maps:map(
+        fun
+            (_, #{name := N}) when N =:= PeerName -> undefined;
+            (_, Value) -> Value
+        end,
+        State0#state.reserved
+    ),
+    State1 = State0#state{active = Active, passive = Passive, reserved = Reserved},
+    State =
+        case same_set(Active, Active0) of
+            true ->
+                State1;
+            false ->
+                RandomPeer = pick_random(Passive, [Myself]),
+                State2 = promote_peer(RandomPeer, State1),
+                ok = notify(State2),
+                State2
+        end,
+    {noreply, State}.
+
 promote_peer(undefined, State) ->
     State;
 promote_peer(Peer, #state{} = State) ->

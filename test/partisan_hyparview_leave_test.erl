@@ -14,14 +14,18 @@
     atom_leave_declines_and_manager_survives/0,
     map_leave_self_declines/0,
     map_leave_other_removes/0,
+    replayed_old_spec_is_not_admitted/0,
     noop_leave_does_not_publish/0,
     public_disconnect_node_declines_locally/0
 ]).
+
+-define(NODE, 'peer@127.0.0.1').
 
 -define(CASES, [
     atom_leave_declines_and_manager_survives,
     map_leave_self_declines,
     map_leave_other_removes,
+    replayed_old_spec_is_not_admitted,
     noop_leave_does_not_publish,
     public_disconnect_node_declines_locally
 ]).
@@ -111,6 +115,43 @@ public_disconnect_node_declines_locally() ->
         )
     end).
 
+%% Two reachable specs of one name must not both enter the active view: the
+%% second advertisement is refused before capacity or eviction is considered.
+replayed_old_spec_is_not_admitted() ->
+    with_manager(fun(Mgr) ->
+        Old = spec(?NODE, 31111),
+        New = spec(?NODE, 32222),
+        OldAddr = addr(31111),
+        NewAddr = addr(32222),
+        [OldPid, NewPid] = [
+            spawn(fun() -> receive stop -> ok end end)
+         || _ <- [1, 2]
+        ],
+        ok = partisan_peer_connections:store(Old, OldPid, ?DEFAULT_CHANNEL, OldAddr),
+        ok = partisan_peer_connections:store(New, NewPid, ?DEFAULT_CHANNEL, NewAddr),
+        Self = partisan:node_spec(),
+
+        ok = partisan_hyparview_peer_service_manager:receive_message(
+            New,
+            ?DEFAULT_CHANNEL,
+            {neighbor, New, tag_new, undefined, Self}
+        ),
+        {ok, Active0} = partisan_hyparview_peer_service_manager:active(),
+        ?assertEqual([New], same_name(Active0, ?NODE)),
+
+        ok = partisan_hyparview_peer_service_manager:receive_message(
+            Old,
+            ?DEFAULT_CHANNEL,
+            {neighbor, Old, tag_old, undefined, Self}
+        ),
+        {ok, Active1} = partisan_hyparview_peer_service_manager:active(),
+        ?assertEqual([New], same_name(Active1, ?NODE)),
+        ?assertEqual(2, sets:size(Active1)),
+        ?assert(is_process_alive(Mgr)),
+        [exit(Pid, kill) || Pid <- [OldPid, NewPid]],
+        ok
+    end).
+
 noop_leave_does_not_publish() ->
     with_manager(fun(_) ->
         Version0 = partisan_membership:version(),
@@ -168,3 +209,10 @@ spec(Name, Port) ->
 
 addr(Port) ->
     #{ip => {127, 0, 0, 1}, port => Port}.
+
+same_name(Active, Name) ->
+    [
+        Spec
+     || Spec <- sets:to_list(Active),
+        maps:get(name, Spec) =:= Name
+    ].
