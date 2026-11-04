@@ -70,10 +70,20 @@ main(_Args) ->
     end.
 
 
-%% Locate the ebin directory for partisan. Honours rebar3's
-%% `REBAR_BUILD_DIR' env var when running as a dep, falling back to a
-%% sensible local path when running from partisan's own repo.
+%% Locate partisan's ebin.
+%%
+%% Mix bare-compiles a dependency into the consumer's build tree and sets
+%% REBAR_BARE_COMPILER_OUTPUT_DIR; that directory wins. Then REBAR_BUILD_DIR
+%% (rebar3), then the local ebin.
 ebin_dir() ->
+    case os:getenv("REBAR_BARE_COMPILER_OUTPUT_DIR") of
+        false ->
+            ebin_dir_rebar();
+        OutputDir ->
+            filename:join(OutputDir, "ebin")
+    end.
+
+ebin_dir_rebar() ->
     case os:getenv("REBAR_BUILD_DIR") of
         false ->
             filename:absname("ebin");
