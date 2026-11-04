@@ -706,8 +706,8 @@ is_self(Arg) ->
 join(NodeSpec) ->
     partisan_peer_service:join(NodeSpec).
 
--doc "Removes the local node from the cluster; a shortcut for `partisan_peer_service:leave/0`.".
--spec leave() -> ok.
+-doc "Removes the local node from the cluster. Returns `{error, not_implemented}` when the manager does not support local leave.".
+-spec leave() -> ok | {error, term()}.
 
 leave() ->
     partisan_peer_service:leave().
@@ -843,22 +843,19 @@ is_fully_connected(NodeOrSpec) ->
 Disconnects the local node from `Node` — the counterpart of
 `erlang:disconnect_node/1`.
 
-If `Node` is the local node, the node leaves the cluster; otherwise it leaves the
-peer identified by `Node`. Returns `true` on success and `false` if `Node` is not a
-known peer.
+If `Node` is local, the manager is asked to leave; otherwise the peer is left.
+Returns `true` on success, `false` if unknown or declined.
 """.
 -spec disconnect_node(Node :: node()) -> boolean() | ignored.
 
 disconnect_node(Node) ->
     case Node == node() of
         true ->
-            ok = partisan_peer_service:leave(),
-            true;
+            ok =:= partisan_peer_service:leave();
         false ->
             try node_spec(Node) of
                 {ok, NodeSpec} ->
-                    ok = partisan_peer_service:leave(NodeSpec),
-                    true;
+                    ok =:= partisan_peer_service:leave(NodeSpec);
                 {error, _} ->
                     false
             catch

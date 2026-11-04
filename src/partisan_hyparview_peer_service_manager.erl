@@ -198,6 +198,7 @@ add-to-passive, promotion, symmetry maintenance) below them.
 -export([leave/1]).
 -export([members/0]).
 -export([members_for_orchestration/0]).
+-export([refresh_node_spec/0]).
 -export([on_down/2]).
 -export([on_down/3]).
 -export([on_up/2]).
@@ -298,6 +299,22 @@ members() ->
 members_for_orchestration() ->
     gen_server:call(?MODULE, members_for_orchestration, infinity).
 
+
+%% -----------------------------------------------------------------------------
+%% @doc Re-read this node's spec from config and re-announce it.
+%%
+%% The manager caches its spec at init/1. After a roam the cached address is
+%% dead, so swap it, rewrite self in the active view by name, publish membership
+%% and re-assert with the ordinary NEIGHBOR. Peers accept it only if the old
+%% address stops answering.
+%%
+%% Returns `unchanged' when config still produces the cached spec.
+%% @end
+%% -----------------------------------------------------------------------------
+-spec refresh_node_spec() -> unchanged | updated.
+
+refresh_node_spec() ->
+    gen_server:call(?MODULE, refresh_node_spec, infinity).
 %% -----------------------------------------------------------------------------
 %% @doc Decode state.
 %% @end
@@ -710,8 +727,9 @@ init([]) ->
 
 handle_call(partitions, _From, State) ->
     {reply, {ok, State#state.partitions}, State};
-handle_call({leave, _Node}, _From, State) ->
-    {reply, {error, not_implemented}, State};
+handle_call({leave, Node}, _From, State0) ->
+    {Reply, State} = do_leave(Node, State0),
+    {reply, Reply, State};
 handle_call({join, #{name := _Name} = Node}, _From, State) ->
     gen_server:cast(?MODULE, {join, Node}),
     {reply, ok, State};
@@ -856,6 +874,9 @@ handle_call(connections, _From, State) ->
         peers(State)
     ),
     {reply, {ok, Cs}, State};
+handle_call(refresh_node_spec, _From, State0) ->
+    {Reply, State} = do_refresh_node_spec(State0),
+    {reply, Reply, State};
 handle_call(Event, _From, State) ->
     ?LOG_WARNING(#{description => "Unhandled call event", event => Event}),
     {reply, ok, State}.
@@ -1221,7 +1242,7 @@ handle_message(
                         ),
 
                         %% Notify with event.
-                        notify(State1),
+                        maybe_notify(State1, State0),
                         State1;
                     false ->
                         State0
@@ -1299,7 +1320,7 @@ handle_message(
     %% here and are no-ops for peers we already hold; firing an event every
     %% round would needlessly wake downstream subscribers (e.g. anti-entropy).
     _ =
-        case State =/= State0 of
+        case same_set(State#state.active, State0#state.active) of
             true ->
                 %% This handler serves both a peer's first NEIGHBOR (a genuine
                 %% join) and a periodic symmetry re-assertion
@@ -1505,7 +1526,7 @@ handle_message(
         end,
 
     %% Notify with event.
-    notify(State),
+    maybe_notify(State, State0),
     {noreply, State};
 handle_message(
     {disconnect, Peer, DisconnectId},
@@ -1668,7 +1689,7 @@ handle_message(
     State = merge_exchange(Exchange, State2),
 
     %% Notify with event.
-    notify(State),
+    maybe_notify(State, State0),
 
     {noreply, State};
 handle_message(
@@ -1712,7 +1733,7 @@ handle_message(
     State = merge_exchange(Exchange, State1),
 
     %% Notify with event.
-    notify(State),
+    maybe_notify(State, State0),
 
     {noreply, State};
 handle_message({shuffle_reply, Exchange, _Sender}, _Channel, State0) ->
@@ -2669,6 +2690,117 @@ handle_update_members(Members, State) ->
     merge_exchange(Members, State).
 
 %% @private
+%% @doc Remove a name from the views, or decline a whole-cluster leave.
+%%
+%% Removal is by name: a peer that roamed may not match the spec we hold. This is
+%% a deletion, not an equality relation.
+do_leave(Node, State0) when is_atom(Node) ->
+    %% Local leave is a lifecycle operation; it needs the listener and discovery
+    %% stopped. Until then return the error. The shape is {Reply, State}.
+    case Node =:= partisan:node() of
+        true -> {{error, not_implemented}, State0};
+        false -> {{error, {unknown_node, Node}}, State0}
+    end;
+do_leave(#{name := Name}, State0) ->
+    %% The map path needs the same local-node guard.
+    case Name =:= partisan:node() of
+        true -> {{error, not_implemented}, State0};
+        false -> do_leave_named(Name, State0)
+    end.
+
+do_leave_named(Name, #state{reserved = Reserved0} = State0) ->
+    %% A reservation is a slot: empty it, do not delete it, or is_full/2 shrinks.
+    Reserved = maps:map(
+        fun
+            (_, #{name := N}) when N =:= Name -> undefined;
+            (_, Value) -> Value
+        end,
+        Reserved0
+    ),
+    State = State0#state{
+        active = remove_by_name(Name, State0#state.active),
+        passive = remove_by_name(Name, State0#state.passive),
+        reserved = Reserved
+    },
+    ok = maybe_notify(State, State0),
+    %% Local eviction only: keep anti-replay entries so delayed messages stay fenced.
+    _ = partisan_peer_service_manager:disconnect([Name], fun(_) -> ok end),
+    {ok, State}.
+
+%% @private
+same_set(A, B) ->
+    sets:size(A) =:= sets:size(B) andalso sets:is_subset(A, B).
+
+%% @private
+%% Publish only when the active set changed.
+maybe_notify(State, State0) ->
+    case same_set(State#state.active, State0#state.active) of
+        true -> ok;
+        false -> notify(State)
+    end.
+
+%% @private
+remove_by_name(Name, Set) ->
+    sets:filter(
+        fun
+            (#{name := N}) -> N =/= Name
+        end,
+        Set
+    ).
+
+do_refresh_node_spec(#state{node_spec = Old, active = Active0} = State0) ->
+    case partisan:node_spec() of
+        Old ->
+            {unchanged, State0};
+        #{name := Name} = New ->
+            ?LOG_INFO(#{
+                description => "Refreshing local node specification",
+                node => Name,
+                old_listen_addrs => maps:get(listen_addrs, Old, []),
+                new_listen_addrs => maps:get(listen_addrs, New, [])
+            }),
+            %% Normalise by name: self must be unique, even after a partial refresh.
+            Active1 = remove_by_name(Name, Active0),
+            Active = sets:add_element(New, Active1),
+            State1 = State0#state{node_spec = New, active = Active},
+            ok = notify(State1),
+            case reassert_neighbor(State1) of
+                ok ->
+                    {updated, State1};
+                {error, Failed} ->
+                    ?LOG_WARNING(#{
+                        description =>
+                            "Refreshed local spec but could not re-assert it to every active peer",
+                        node => Name,
+                        failed_peers => Failed
+                    }),
+                    {updated, State1}
+            end
+    end.
+
+%% @private
+%% Re-send the new spec with the ordinary NEIGHBOR. Best effort; failures are
+%% reported, not hidden.
+reassert_neighbor(#state{node_spec = New, tag = Tag} = State) ->
+    Failed = lists:foldl(
+        fun(Peer, Acc) ->
+            LastDisconnectId = get_current_id(Peer, State#state.recv_message_map),
+            case do_send_message(
+                Peer, {neighbor, New, Tag, LastDisconnectId, Peer}
+            ) of
+                ok -> Acc;
+                {error, _} -> [maps:get(name, Peer, Peer) | Acc]
+            end
+        end,
+        [],
+        peers(State)
+    ),
+    case Failed of
+        [] -> ok;
+        _ -> {error, lists:reverse(Failed)}
+    end.
+
+%% @private
 notify(#state{active = Active}) ->
     %% The overlay Plumtree runs on is the active view; feed it to the
     %% membership snapshot (and push subscribers) as well as the legacy bus.
@@ -3014,8 +3146,8 @@ schedule_active_view_maintenance(State) ->
     Default = config_get(random_promotion_interval, State),
     Time =
         case partisan_config:get(active_view_maintenance_interval, undefined) of
-            undefined -> Default;
-            Val -> Val
+            Val when is_integer(Val), Val > 0 -> Val;
+            _ -> Default
         end,
     erlang:send_after(Time, ?MODULE, active_view_maintenance).
 
