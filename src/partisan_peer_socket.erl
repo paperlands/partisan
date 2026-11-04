@@ -387,6 +387,9 @@ send(Transport, Socket, Data) ->
 %% after a given period with no transmissions.
 %%
 %% @private
+%% No previous timestamp: nothing supersedes the first message.
+monotonic_should_send(_MessageQueueLen, undefined) ->
+    true;
 monotonic_should_send(MessageQueueLen, LastTransmissionTime) ->
     case MessageQueueLen > 0 of
         true ->
