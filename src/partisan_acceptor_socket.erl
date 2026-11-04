@@ -60,7 +60,7 @@ init([PeerIP, PeerPort]) ->
         {reuseaddr, true},
         {nodelay, true},
         {keepalive, true}
-    ],
+    ] ++ partisan_peer_socket:tcp_keepalive_opts(),
     case gen_tcp:listen(PeerPort, Opts) of
         {ok, Socket} ->
             %% if the port is to be system allocated we need to set

@@ -47,7 +47,8 @@
 -type state() :: #state{}.
 
 %% Macros.
--define(TIMEOUT, 1000).
+%% Fallback only; the effective ceiling is `connect_timeout'.
+-define(TIMEOUT, 5000).
 
 %% API
 -export([start_link/5]).
@@ -329,12 +330,18 @@ connect(#{ip := Address, port := Port}, Channel, ChannelOpts) when
         {packet, 4},
         {packet_size, partisan_config:get(max_message_size)},
         {keepalive, true}
-    ],
+    ] ++ partisan_peer_socket:tcp_keepalive_opts(),
 
     Opts = [{monotonic, maps:get(monotonic, ChannelOpts, false)}],
 
+    %% Clamp here too: get/2 returns the configured value unchanged.
+    Timeout =
+        case partisan_config:get(connect_timeout, ?TIMEOUT) of
+            T when is_integer(T), T > 0 -> T;
+            _ -> ?TIMEOUT
+        end,
     Result = partisan_peer_socket:connect(
-        Address, Port, SocketOpts, ?TIMEOUT, Opts
+        Address, Port, SocketOpts, Timeout, Opts
     ),
 
     case Result of

@@ -100,6 +100,16 @@ The list can habe a mix of types and during startup they are all coerced to chan
 
 A configuration that is intended solely for testing of the {@link partisan_full_membership_strategy} (See `membership_strategy'). It defines whether to use Distributed Erlang (disterl) in addition to Partisan channels. Defaults to `false'. Notice that this setting does not prevent you having both disterl and Partisan enabled for your release. However, you need to have special care to avoid mixing the two, for example by calling a {@link partisan_gen_server} that uses Partisan for distribution with {@link gen_server} that uses disterl.
 
+#### connect_timeout
+
+Milliseconds a single connection attempt may take before it is abandoned. Defaults to
+`5000`.
+
+An address that does not answer is as expensive to wait on as a dead node is to
+discover, and the right ceiling depends on the network: a LAN peer answers in
+milliseconds, a peer across a wide area may not. This bounds one attempt; the spacing
+between attempts is governed by `connection_interval` and `connection_jitter`.
+
 #### connection_interval
 
 Interval of time between peer connection attempts
@@ -293,6 +303,14 @@ The role of this node when using the Client-Server topology implemented by @{lin
 #### max_message_size
 
 Maximum size in bytes of an inbound peer message frame. Frames larger than this are rejected before they are assembled or decoded, guarding against pre-authentication memory exhaustion and decompression bombs on the peer plane. The default is `67108864' (64 MB).
+
+#### tcp_keepalive
+
+TCP keepalive tuning for peer sockets: `#{idle => Seconds, interval => Seconds, count => N}`,
+applied to outgoing connections and the listener. Values are seconds (the native
+TCP unit), positive 32-bit integers; invalid values are ignored. Defaults to
+`undefined` (OS defaults). Kernel keepalive is a backstop; `connection_ping`
+remains the primary failure detector.
 
 #### tls
 
@@ -494,6 +512,8 @@ init() ->
             {broadcast_mods, [partisan_plumtree_backend]},
             {causal_labels, []},
             {channel_fallback, true},
+            %% One connection attempt's ceiling. See `connect_timeout`.
+            {connect_timeout, 5000},
             {connect_disterl, false},
             {connection_jitter, ?CONNECTION_JITTER},
             {connection_interval, 1000},
@@ -568,6 +588,7 @@ init() ->
             {reservations, []},
             {shrinking, false},
             {tag, DefaultTag},
+            {tcp_keepalive, undefined},
             {tls, false},
             {tls_client_options, []},
             {tls_handshake_timeout, ?DEFAULT_TLS_HANDSHAKE_TIMEOUT},

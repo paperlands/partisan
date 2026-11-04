@@ -53,6 +53,7 @@
 -export([send/2]).
 -export([setopts/2]).
 -export([socket/1]).
+-export([tcp_keepalive_opts/0]).
 
 %% =============================================================================
 %% API
@@ -400,4 +401,32 @@ monotonic_should_send(MessageQueueLen, LastTransmissionTime) ->
         false ->
             %% No messages in queue; transmit.
             true
+    end.
+
+%% @doc TCP keepalive options, when configured.
+%%
+%% Values are seconds (native unit) and positive 32-bit integers; unset or
+%% invalid leaves the OS defaults. `connection_ping` remains the primary
+%% detector; keepalive is the backstop for accepted sockets.
+-spec tcp_keepalive_opts() -> [{raw, integer(), integer(), binary()}].
+tcp_keepalive_opts() ->
+    case partisan_config:get(tcp_keepalive, undefined) of
+        #{idle := Idle, interval := Interval, count := Count}
+          when is_integer(Idle), Idle > 0, Idle =< 16#FFFFFFFF,
+               is_integer(Interval), Interval > 0, Interval =< 16#FFFFFFFF,
+               is_integer(Count), Count > 0, Count =< 16#FFFFFFFF ->
+            case os:type() of
+                {unix, linux} ->
+                    [
+                        {raw, 6, 4, <<Idle:32/native>>},
+                        {raw, 6, 5, <<Interval:32/native>>},
+                        {raw, 6, 6, <<Count:32/native>>}
+                    ];
+                {unix, darwin} ->
+                    [{raw, 6, 16#10, <<Idle:32/native>>}];
+                _ ->
+                    []
+            end;
+        _ ->
+            []
     end.
