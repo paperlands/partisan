@@ -207,6 +207,11 @@ handle_inbound(
         }
     ),
     {noreply, reset_ping(State)};
+handle_inbound(#pong{from = Node}, #state{peer_node = Node} = State) when
+    Node =/= undefined
+->
+    %% A retry can overtake a reply. Only the current ID resets the heartbeat.
+    {noreply, State};
 handle_inbound(#pong{} = Pong, #state{} = State) ->
     {stop, {invalid_ping_response, Pong}, State};
 handle_inbound(Message, State) ->
@@ -342,3 +347,59 @@ send_pong(State, #ping{id = Id, timestamp = Ts}) ->
         timestamp = Ts
     },
     send_message(State#state.socket, Pong).
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+pong_first_reply_after_retry_test() ->
+    {Peer, State} = pong_test_state(),
+    Pong = #pong{from = Peer, id = make_ref()},
+    ?assertEqual({noreply, State}, handle_inbound(Pong, State)).
+
+pong_wrong_peer_test() ->
+    {_Peer, State} = pong_test_state(),
+    Pong = #pong{from = wrong_peer, id = State#state.ping_id},
+    ?assertEqual(
+        {stop, {invalid_ping_response, Pong}, State},
+        handle_inbound(Pong, State)
+    ).
+
+pong_current_reply_test() ->
+    {Peer, State} = pong_test_state(),
+    Pong = #pong{
+        from = Peer,
+        id = State#state.ping_id,
+        timestamp = erlang:system_time(millisecond)
+    },
+    {noreply, Updated} = handle_inbound(Pong, State),
+    try
+        ?assertEqual(0, partisan_retry:count(Updated#state.ping_retry)),
+        ?assert(is_reference(Updated#state.ping_tref)),
+        ?assertNotEqual(State#state.ping_tref, Updated#state.ping_tref)
+    after
+        erlang:cancel_timer(Updated#state.ping_tref)
+    end.
+
+pong_retry_exhaustion_test() ->
+    {Peer, State} = pong_test_state(),
+    {noreply, Unchanged} = handle_inbound(
+        #pong{from = Peer, id = make_ref()}, State
+    ),
+    ?assertEqual(
+        {stop, {shutdown, ping_timeout}, State},
+        handle_info({timeout, State#state.ping_tref, ping_timeout}, Unchanged)
+    ).
+
+pong_test_state() ->
+    Peer = expected_peer,
+    Retry0 = partisan_retry:init(ping_timeout, #{max_retries => 1, deadline => 0}),
+    {_, Retry} = partisan_retry:fail(Retry0),
+    {Peer, #state{
+        peer_node = Peer,
+        ping_id = make_ref(),
+        ping_tref = make_ref(),
+        ping_retry = Retry,
+        ping_idle_timeout = 60000
+    }}.
+
+-endif.
