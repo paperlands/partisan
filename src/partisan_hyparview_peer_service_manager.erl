@@ -153,7 +153,7 @@ add-to-passive, promotion, symmetry maintenance) below them.
 -type t() :: #state{}.
 -type repair() :: undefined
     | {reference(), pid(), partisan:node_spec()}
-    | {cancelled, pid()}.
+    | {cancelled, reference(), pid(), partisan:node_spec()}.
 -type active() :: sets:set(partisan:node_spec()).
 -type passive() :: sets:set(partisan:node_spec()).
 -type reserved() :: #{atom() := partisan:node_spec()}.
@@ -981,7 +981,7 @@ handle_info_event({repair_done, Ref, Worker, Peer, Intent, Outcome}, State) ->
                     repair_outcome(Ref, Peer, Outcome)
             end,
             {noreply, State#state{repair = undefined}};
-        {cancelled, Worker} ->
+        {cancelled, _Ref, Worker, _Peer} ->
             repair_outcome(Ref, Peer, cancelled),
             {noreply, State#state{repair = undefined}};
         _ ->
@@ -1029,9 +1029,10 @@ handle_info_event(
     repair_outcome(Ref, Peer, {crashed, Reason}),
     {noreply, State#state{repair = undefined}};
 handle_info_event(
-    {'EXIT', Worker, Reason}, #state{repair = {cancelled, Worker}} = State
+    {'EXIT', Worker, Reason},
+    #state{repair = {cancelled, Ref, Worker, Peer}} = State
 ) ->
-    repair_outcome(undefined, undefined, {crashed, Reason}),
+    repair_outcome(Ref, Peer, {crashed, Reason}),
     {noreply, State#state{repair = undefined}};
 handle_info_event(random_promotion, State0) ->
     Myself = State0#state.node_spec,
@@ -1199,7 +1200,7 @@ handle_info_event(Event, State) ->
 terminate(_Reason, State) ->
     case State#state.repair of
         undefined -> ok;
-        {cancelled, Worker} -> exit(Worker, shutdown);
+        {cancelled, _, Worker, _} -> exit(Worker, shutdown);
         {_, Worker, _} -> exit(Worker, shutdown)
     end,
     ok = partisan_peer_connections:kill_all().
@@ -1224,10 +1225,10 @@ finish_event({noreply, State}) ->
 
 %% Revocation survives an identical spec being re-admitted later.
 %% reconnect-deferred-maintenance
-reconcile_repair(#state{repair = {_, Worker, Peer}} = State) ->
+reconcile_repair(#state{repair = {Ref, Worker, Peer}} = State) ->
     case sets:is_element(Peer, State#state.active) of
         true -> State;
-        false -> State#state{repair = {cancelled, Worker}}
+        false -> State#state{repair = {cancelled, Ref, Worker, Peer}}
     end;
 reconcile_repair(State) ->
     State.

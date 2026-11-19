@@ -72,7 +72,11 @@ crash_reports_one_outcome_test() ->
     with_manager(fun(Mgr) ->
         Peer = spec(31111),
         Ref = make_ref(),
-        Worker = spawn(fun() -> receive stop -> ok end end),
+        Worker = spawn(fun() ->
+            receive
+                stop -> ok
+            end
+        end),
         seed(Mgr, Peer, {Ref, Worker, Peer}, []),
         %% A real attempt is spawn_link'ed by the owner, not by the test.
         _ = sys:replace_state(Mgr, fun(State) ->
@@ -92,12 +96,55 @@ crash_reports_one_outcome_test() ->
         exit(Worker, boom),
         ?assert(wait(fun() -> repair(Mgr) =:= undefined end)),
         receive
-            {outcome, #{attempt := Ref, peer_node := Peer, outcome := {crashed, boom}}} -> ok
+            {outcome, #{
+                attempt := Ref, peer_node := Peer, outcome := {crashed, boom}
+            }} ->
+                ok
         after 1000 -> error(no_crash_outcome)
         end,
         receive
             {outcome, _} -> error(duplicate_outcome)
         after 100 -> ok
+        end,
+        ok = telemetry:detach(Handler)
+    end).
+
+cancelled_attempt_crash_keeps_attribution_test() ->
+    with_manager(fun(Mgr) ->
+        Old = spec(31111),
+        New = spec(32222),
+        Ref = make_ref(),
+        Worker = spawn(fun() ->
+            receive
+                stop -> ok
+            end
+        end),
+        NewClient = holder(),
+        seed(Mgr, Old, {Ref, Worker, Old}, [{New, NewClient}]),
+        _ = sys:replace_state(Mgr, fun(State) ->
+            true = link(Worker),
+            State
+        end),
+        neighbor(Mgr, New),
+        ?assertMatch({cancelled, _, Worker, _}, repair(Mgr)),
+        Parent = self(),
+        Handler = {?MODULE, {cancel_crash, Ref}},
+        ok = telemetry:attach(
+            Handler,
+            [partisan, hyparview, repair, outcome],
+            fun(_Event, _Measurements, Metadata, _Config) ->
+                Parent ! {outcome, Metadata}
+            end,
+            undefined
+        ),
+        exit(Worker, boom),
+        ?assert(wait(fun() -> repair(Mgr) =:= undefined end)),
+        receive
+            {outcome, #{
+                attempt := Ref, peer_node := Old, outcome := {crashed, boom}
+            }} ->
+                ok
+        after 1000 -> error(no_crash_outcome)
         end,
         ok = telemetry:detach(Handler)
     end).
@@ -124,14 +171,14 @@ cancelled_attempt_cannot_regain_its_license_test() ->
         NewClient = holder(),
         seed(Mgr, Old, {Ref, Worker, Old}, [{New, NewClient}]),
         neighbor(Mgr, New),
-        ?assertEqual({cancelled, Worker}, repair(Mgr)),
+        ?assertMatch({cancelled, _, Worker, _}, repair(Mgr)),
         sys:replace_state(Mgr, fun(State) ->
             setelement(5, State, sets:add_element(Old, element(5, State)))
         end),
         Parent = self(),
         Mgr ! {repair_dial, Ref, Worker},
         gen_server:call(Mgr, get_local_state, 1000),
-        ?assertEqual({cancelled, Worker}, repair(Mgr)),
+        ?assertMatch({cancelled, _, Worker, _}, repair(Mgr)),
         LateClient = holder(),
         Mgr !
             {repair_connected, Ref, Worker, Old, LateClient, undefined,
@@ -160,7 +207,9 @@ cancelled_attempt_cannot_regain_its_license_test() ->
 plumtree_init_reads_watermark_before_names_test() ->
     %% Under cover `code:which/1' answers `cover_compiled', which has no beam
     %% file to disassemble. The on-disk artifact is the code cover wrapped.
-    Beam = code:where_is_file(atom_to_list(partisan_plumtree_broadcast) ++ ".beam"),
+    Beam = code:where_is_file(
+        atom_to_list(partisan_plumtree_broadcast) ++ ".beam"
+    ),
     ?assertNotEqual(non_existing, Beam),
     {beam_file, _, _, _, _, Functions} = beam_disasm:file(Beam),
     {function, init, 1, _, Instructions} = lists:keyfind(init, 2, Functions),
