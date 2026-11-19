@@ -1,7 +1,7 @@
-%% A shuffle tick captures its exchange and self spec before it dials. If a
-%% NEIGHBOR replaces self while the target stays active, the licensed
-%% completion must rebuild the envelope: the receiver treats the sender as a
-%% control address, so a stale spec recreates dial work to an old address.
+%% A shuffle attempt carries intent only. If a NEIGHBOR replaces self while
+%% the target stays active, the licensed completion must derive the envelope
+%% from current state: the receiver treats the sender as a control address, so
+%% a stale spec recreates dial work to an old address.
 -module(partisan_hyparview_shuffle_repair_test).
 -include_lib("eunit/include/eunit.hrl").
 
@@ -9,13 +9,21 @@
 
 -define(MGR, partisan_hyparview_peer_service_manager).
 
-refresh_before_completion_sends_current_self_test_() ->
+intent_completion_uses_current_self_test_() ->
     {timeout, 30,
         fun() ->
-            with_config_snapshot(fun refresh_before_completion_sends_current_self/0)
+            with_config_snapshot(fun() -> run(fun(_Old) -> shuffle end) end)
         end}.
 
-refresh_before_completion_sends_current_self() ->
+%% An attempt created before the intent-only form still holds the captured
+%% tuple; finishing it must rebuild the same way.
+in_flight_tuple_completion_uses_current_self_test_() ->
+    {timeout, 30,
+        fun() ->
+            with_config_snapshot(fun() -> run(fun(Old) -> {shuffle, [Old], 1, Old} end) end)
+        end}.
+
+run(Completion) ->
     {ok, _} = application:ensure_all_started(telemetry),
     ok = partisan_config:init(),
     ok = partisan_config:set(peer_service_manager, ?MGR),
@@ -51,12 +59,14 @@ refresh_before_completion_sends_current_self() ->
             {control, {neighbor, New, _, _, _}} -> ok
         after 1000 -> error(no_refreshed_neighbor)
         end,
+        Arwl = maps:get(active_rwl, partisan_config:get(hyparview)),
         %% The completion still holds the license: exact attempt, exact target
-        %% spec, target active. Only the wire content was captured too early.
-        Mgr ! {repair_finished, Ref, Holder, Peer, {shuffle, [Old], 1, Old}},
+        %% spec, target active. Only the envelope is derived late.
+        Mgr ! {repair_finished, Ref, Holder, Peer, Completion(Old)},
         receive
-            {control, {shuffle, Exchange, 1, Sender}} ->
+            {control, {shuffle, Exchange, Ttl, Sender}} ->
                 ?assertEqual(New, Sender),
+                ?assertEqual(Arwl, Ttl),
                 ?assert(lists:member(New, Exchange)),
                 ?assertNot(lists:member(Old, Exchange))
         after 1000 -> error(no_shuffle_completion)

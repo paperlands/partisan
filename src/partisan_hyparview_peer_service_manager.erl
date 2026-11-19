@@ -1063,17 +1063,15 @@ handle_info_event(passive_view_maintenance, State0) ->
     %% (where ka and kp are protocol parameters).
     Myself = State0#state.node_spec,
     Active = State0#state.active,
-
-    Exchange = select_peers_for_exchange(State0),
-
+    %% The attempt carries intent only: the exchange, self spec and ARWL are
+    %% read when it completes, after any refresh that replaced self.
     %% Select random member of the active list to send the shuffle message to
     State =
         case pick_random(Active, [Myself]) of
             undefined ->
                 State0;
             Peer ->
-                ARWL = config_get(active_rwl, State0),
-                start_repair(Peer, {shuffle, Exchange, ARWL, Myself}, State0)
+                start_repair(Peer, shuffle, State0)
         end,
 
     %% Reschedule.
@@ -1231,11 +1229,15 @@ start_repair(_, _, State) ->
     State.
 
 %% @private
-%% The tick captures its exchange before the dial; self can be replaced by a
-%% NEIGHBOR while the target stays active. Rebuild the envelope from current
-%% state so a licensed completion never sends a superseded self spec.
-repair_message({shuffle, _Exchange, TTL, _Myself}, State) ->
-    {shuffle, select_peers_for_exchange(State), TTL, State#state.node_spec};
+%% The attempt carries intent only; self can be replaced by a NEIGHBOR while
+%% the target stays active. Derive the envelope from current state at finish
+%% so a licensed completion never sends a superseded spec or stale exchange.
+repair_message(shuffle, State) ->
+    {shuffle, select_peers_for_exchange(State), config_get(active_rwl, State),
+        State#state.node_spec};
+%% An attempt created before a hot upgrade still carries the captured tuple.
+repair_message({shuffle, _Exchange, _Arwl, _Myself}, State) ->
+    repair_message(shuffle, State);
 repair_message(Message, _State) ->
     Message.
 
