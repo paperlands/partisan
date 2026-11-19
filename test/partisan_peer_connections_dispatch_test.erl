@@ -10,7 +10,7 @@
 -define(M, partisan_hyparview_peer_service_manager).
 
 known_dead_row_redispatch_test_() ->
-    {timeout, 60, fun() -> with_config_snapshot(fun known_dead_row_redispatch/0) end}.
+    {timeout, 60, fun() -> partisan_test_config:with_snapshot(fun known_dead_row_redispatch/0) end}.
 
 known_dead_row_redispatch() ->
     {ok, _} = application:ensure_all_started(telemetry),
@@ -26,7 +26,7 @@ known_dead_row_redispatch() ->
     }),
     ok = partisan_config:set(channel_fallback, true),
     ok = partisan_config:set(disable_fast_forward, false),
-    ok = reset_membership_table(),
+    ok = partisan_test_config:reset_membership_table(),
     {ok, Owner} = ?M:start_link(),
     Parent = self(),
     Holders = [
@@ -134,61 +134,12 @@ known_dead_row_redispatch() ->
         ?assertEqual({ok, New}, ?R:dispatch_pid(mixed_fixture, data, OldKey)),
         ?assertEqual({ok, Default}, ?R:dispatch_pid(default_fixture, data, 0))
     after
-        stop_quietly(Owner),
-        [stop_quietly(Holder) || Holder <- Holders],
-        delete_membership_table()
+        partisan_test_config:stop_quietly(Owner),
+        [partisan_test_config:stop_quietly(Holder) || Holder <- Holders],
+        partisan_test_config:delete_membership_table()
     end,
     ok.
 
-with_config_snapshot(Fun) ->
-    Before = config_snapshot(),
-    try
-        Fun()
-    after
-        config_restore(Before)
-    end.
-
-%% The fixture calls init/0, which rewrites every partisan_config persistent
-%% term and application env entry. Put both back so a later module in the same
-%% EUnit VM sees the configuration it started with.
-config_snapshot() ->
-    Terms = [{Key, Value} || {Key, Value} <- persistent_term:get(), is_config_key(Key)],
-    {Terms, application:get_all_env(partisan)}.
-
-config_restore({Terms, Env}) ->
-    [
-        persistent_term:erase(Key)
-     || Key <- [Key || {Key, _} <- persistent_term:get(), is_config_key(Key)]
-    ],
-    [persistent_term:put(Key, Value) || {Key, Value} <- Terms],
-    [
-        application:unset_env(partisan, Key)
-     || Key <- proplists:get_keys(application:get_all_env(partisan))
-    ],
-    [application:set_env(partisan, Key, Value) || {Key, Value} <- Env],
-    ok.
-
-is_config_key({partisan_config, _}) -> true;
-is_config_key(_) -> false.
-
-reset_membership_table() ->
-    case ets:info(partisan_membership, name) of
-        undefined -> ok;
-        _ -> delete_membership_table()
-    end,
-    _ = ets:new(partisan_membership, [named_table, public, set]),
-    true = ets:insert(partisan_membership, [{version, 0}, {members, []}]),
-    ok.
-
-stop_quietly(Pid) ->
-    try
-        gen_server:stop(Pid, normal, 1000)
-    catch
-        _:_ -> exit(Pid, kill)
-    end.
-
-delete_membership_table() ->
-    try ets:delete(partisan_membership) catch _:_ -> ok end.
 
 init([Parent]) ->
     {ok, Parent}.

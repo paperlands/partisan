@@ -16,6 +16,7 @@ stale_completion_cannot_store_test() ->
             receive
                 {repair_commit, Ref, Candidate, Outcome} ->
                     exit(Candidate, shutdown),
+                    Mgr ! {repair_done, Ref, self(), Old, shuffle, cancelled},
                     Parent ! {completion, Outcome}
             end
         end),
@@ -46,6 +47,7 @@ current_completion_is_owner_committed_test() ->
         Worker = spawn(fun() ->
             receive
                 {repair_commit, Ref, Candidate, Outcome} ->
+                    Mgr ! {repair_done, Ref, self(), Old, shuffle, done},
                     Parent ! {completion, Outcome}
             end
         end),
@@ -64,6 +66,40 @@ current_completion_is_owner_committed_test() ->
             protected, ets:info(partisan_peer_connections, protection)
         ),
         ?assertEqual(Version, partisan_membership:version())
+    end).
+
+crash_reports_one_outcome_test() ->
+    with_manager(fun(Mgr) ->
+        Peer = spec(31111),
+        Ref = make_ref(),
+        Worker = spawn(fun() -> receive stop -> ok end end),
+        seed(Mgr, Peer, {Ref, Worker, Peer}, []),
+        %% A real attempt is spawn_link'ed by the owner, not by the test.
+        _ = sys:replace_state(Mgr, fun(State) ->
+            true = link(Worker),
+            State
+        end),
+        Parent = self(),
+        Handler = {?MODULE, Ref},
+        ok = telemetry:attach(
+            Handler,
+            [partisan, hyparview, repair, outcome],
+            fun(_Event, _Measurements, Metadata, _Config) ->
+                Parent ! {outcome, Metadata}
+            end,
+            undefined
+        ),
+        exit(Worker, boom),
+        ?assert(wait(fun() -> repair(Mgr) =:= undefined end)),
+        receive
+            {outcome, #{attempt := Ref, peer_node := Peer, outcome := {crashed, boom}}} -> ok
+        after 1000 -> error(no_crash_outcome)
+        end,
+        receive
+            {outcome, _} -> error(duplicate_outcome)
+        after 100 -> ok
+        end,
+        ok = telemetry:detach(Handler)
     end).
 
 publication_changes_once_and_noop_is_silent_test() ->
@@ -103,7 +139,7 @@ cancelled_attempt_cannot_regain_its_license_test() ->
         gen_server:call(Mgr, get_local_state, 1000),
         ?assertEqual(0, partisan_peer_connections:count(Old)),
         gen_server:stop(LateClient),
-        Mgr ! {'EXIT', Worker, normal},
+        Mgr ! {repair_done, Ref, Worker, Old, shuffle, cancelled},
         gen_server:call(Mgr, get_local_state, 1000),
         ?assertEqual(undefined, repair(Mgr)),
         sys:replace_state(Mgr, fun(State) ->

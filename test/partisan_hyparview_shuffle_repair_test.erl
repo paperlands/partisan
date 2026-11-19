@@ -9,21 +9,10 @@
 
 -define(MGR, partisan_hyparview_peer_service_manager).
 
-intent_completion_uses_current_self_test_() ->
-    {timeout, 30,
-        fun() ->
-            with_config_snapshot(fun() -> run(fun(_Old) -> shuffle end) end)
-        end}.
+intent_completion_sends_current_self_test_() ->
+    {timeout, 30, fun() -> partisan_test_config:with_snapshot(fun run/0) end}.
 
-%% An attempt created before the intent-only form still holds the captured
-%% tuple; finishing it must rebuild the same way.
-in_flight_tuple_completion_uses_current_self_test_() ->
-    {timeout, 30,
-        fun() ->
-            with_config_snapshot(fun() -> run(fun(Old) -> {shuffle, [Old], 1, Old} end) end)
-        end}.
-
-run(Completion) ->
+run() ->
     {ok, _} = application:ensure_all_started(telemetry),
     ok = partisan_config:init(),
     ok = partisan_config:set(peer_service_manager, ?MGR),
@@ -32,7 +21,7 @@ run(Completion) ->
         random_promotion => false,
         active_view_maintenance_interval => 3600000
     }),
-    ok = reset_membership_table(),
+    ok = partisan_test_config:reset_membership_table(),
     {ok, Mgr} = ?MGR:start_link(),
     Parent = self(),
     {ok, Holder} = gen_server:start(?MODULE, [Parent], []),
@@ -62,7 +51,7 @@ run(Completion) ->
         Arwl = maps:get(active_rwl, partisan_config:get(hyparview)),
         %% The completion still holds the license: exact attempt, exact target
         %% spec, target active. Only the envelope is derived late.
-        Mgr ! {repair_finished, Ref, Holder, Peer, Completion(Old)},
+        Mgr ! {repair_done, Ref, Holder, Peer, shuffle, done},
         receive
             {control, {shuffle, Exchange, Ttl, Sender}} ->
                 ?assertEqual(New, Sender),
@@ -72,54 +61,12 @@ run(Completion) ->
         after 1000 -> error(no_shuffle_completion)
         end
     after
-        stop_quietly(Mgr),
-        stop_quietly(Holder),
-        delete_membership_table()
+        partisan_test_config:stop_quietly(Mgr),
+        partisan_test_config:stop_quietly(Holder),
+        partisan_test_config:delete_membership_table()
     end,
     ok.
 
-with_config_snapshot(Fun) ->
-    Before = config_snapshot(),
-    try
-        Fun()
-    after
-        config_restore(Before)
-    end.
-
-config_snapshot() ->
-    Terms = [{Key, Value} || {Key, Value} <- persistent_term:get(), is_config_key(Key)],
-    {Terms, application:get_all_env(partisan)}.
-
-config_restore({Terms, Env}) ->
-    [
-        persistent_term:erase(Key)
-     || Key <- [Key || {Key, _} <- persistent_term:get(), is_config_key(Key)]
-    ],
-    [persistent_term:put(Key, Value) || {Key, Value} <- Terms],
-    [
-        application:unset_env(partisan, Key)
-     || Key <- proplists:get_keys(application:get_all_env(partisan))
-    ],
-    [application:set_env(partisan, Key, Value) || {Key, Value} <- Env],
-    ok.
-
-is_config_key({partisan_config, _}) -> true;
-is_config_key(_) -> false.
-
-reset_membership_table() ->
-    case ets:info(partisan_membership, name) of
-        undefined -> ok;
-        _ -> delete_membership_table()
-    end,
-    _ = ets:new(partisan_membership, [named_table, public, set]),
-    true = ets:insert(partisan_membership, [{version, 0}, {members, []}]),
-    ok.
-
-stop_quietly(Pid) ->
-    try gen_server:stop(Pid) catch _:_ -> exit(Pid, kill) end.
-
-delete_membership_table() ->
-    try ets:delete(partisan_membership) catch _:_ -> ok end.
 
 init([Parent]) ->
     {ok, Parent}.

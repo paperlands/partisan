@@ -967,17 +967,26 @@ handle_cast_event(Event, State) ->
 handle_info(Event, State) ->
     finish_event(handle_info_event(Event, State)).
 
-handle_info_event({repair_finished, Ref, Worker, Peer, Message}, State) ->
+handle_info_event({repair_done, Ref, Worker, Peer, Intent, Outcome}, State) ->
     case State#state.repair of
         {Ref, Worker, Peer} ->
-            case sets:is_element(Peer, State#state.active) of
-                true -> do_send_message(Peer, repair_message(Message, State));
-                false -> ok
-            end;
+            case {Outcome, sets:is_element(Peer, State#state.active)} of
+                {done, true} ->
+                    _ = do_send_message(Peer, repair_message(Intent, State)),
+                    repair_outcome(Ref, Peer, done);
+                {done, false} ->
+                    %% The peer was revoked while the attempt was in flight.
+                    repair_outcome(Ref, Peer, cancelled);
+                _ ->
+                    repair_outcome(Ref, Peer, Outcome)
+            end,
+            {noreply, State#state{repair = undefined}};
+        {cancelled, Worker} ->
+            repair_outcome(Ref, Peer, cancelled),
+            {noreply, State#state{repair = undefined}};
         _ ->
-            ok
-    end,
-    {noreply, State};
+            {noreply, State}
+    end;
 handle_info_event({repair_dial, Ref, Worker}, State) ->
     case State#state.repair of
         {Ref, Worker, Peer} ->
@@ -1013,12 +1022,16 @@ handle_info_event(
     ),
     {noreply, State};
 handle_info_event(
-    {'EXIT', Worker, _Reason}, #state{repair = {_, Worker, _}} = State
+    {'EXIT', Worker, Reason}, #state{repair = {Ref, Worker, Peer}} = State
 ) ->
+    %% Every worker reports a terminal outcome before it exits, so an EXIT
+    %% that finds the attempt still open means the report never arrived.
+    repair_outcome(Ref, Peer, {crashed, Reason}),
     {noreply, State#state{repair = undefined}};
 handle_info_event(
-    {'EXIT', Worker, _Reason}, #state{repair = {cancelled, Worker}} = State
+    {'EXIT', Worker, Reason}, #state{repair = {cancelled, Worker}} = State
 ) ->
+    repair_outcome(undefined, undefined, {crashed, Reason}),
     {noreply, State#state{repair = undefined}};
 handle_info_event(random_promotion, State0) ->
     Myself = State0#state.node_spec,
@@ -1234,12 +1247,34 @@ start_repair(_, _, State) ->
 %% so a licensed completion never sends a superseded spec or stale exchange.
 repair_message(shuffle, State) ->
     {shuffle, select_peers_for_exchange(State), config_get(active_rwl, State),
-        State#state.node_spec};
-%% An attempt created before a hot upgrade still carries the captured tuple.
-repair_message({shuffle, _Exchange, _Arwl, _Myself}, State) ->
-    repair_message(shuffle, State);
-repair_message(Message, _State) ->
-    Message.
+        State#state.node_spec}.
+
+%% @private
+%% One terminal outcome per attempt, whether it reported or died trying.
+repair_outcome(Ref, Peer, {crashed, Reason} = Outcome) ->
+    ?LOG_WARNING(#{
+        description => "Maintenance attempt died without reporting an outcome",
+        attempt => Ref,
+        peer_node => Peer,
+        reason => Reason
+    }),
+    repair_outcome_telemetry(Ref, Peer, Outcome);
+repair_outcome(Ref, Peer, Outcome) ->
+    ?LOG_DEBUG(#{
+        description => "Maintenance attempt finished",
+        attempt => Ref,
+        peer_node => Peer,
+        outcome => Outcome
+    }),
+    repair_outcome_telemetry(Ref, Peer, Outcome).
+
+%% @private
+repair_outcome_telemetry(Ref, Peer, Outcome) ->
+    partisan_telemetry:execute(
+        [partisan, hyparview, repair, outcome],
+        #{count => 1},
+        #{attempt => Ref, peer_node => Peer, outcome => Outcome}
+    ).
 
 repair_connect(Owner, Ref, Peer, Message) ->
     Connector = fun(Spec, Addr, Channel, Opts) ->
@@ -1262,7 +1297,8 @@ repair_connect(Owner, Ref, Peer, Message) ->
                         unlink(Pid),
                         Result;
                     {repair_commit, Ref, Pid, discarded} ->
-                        unlink(Pid),
+                        %% Kill while the worker still holds the link: a cut
+                        %% here must not leave an unregistered client alive.
                         exit(Pid, shutdown),
                         throw(cancelled)
                 end;
@@ -1270,14 +1306,16 @@ repair_connect(Owner, Ref, Peer, Message) ->
                 Error
         end
     end,
-    try
-        ok = partisan_peer_service_manager:connect(
-            Peer, #{prune => false}, Connector
-        ),
-        Owner ! {repair_finished, Ref, self(), Peer, Message}
-    catch
-        throw:cancelled -> ok
-    end.
+    Outcome =
+        try
+            ok = partisan_peer_service_manager:connect(
+                Peer, #{prune => false}, Connector
+            ),
+            done
+        catch
+            throw:cancelled -> cancelled
+        end,
+    Owner ! {repair_done, Ref, self(), Peer, Message, Outcome}.
 handle_message({resolve_partition, Reference}, _, State) ->
     Partitions = handle_partition_resolution(Reference, State),
     {noreply, State#state{partitions = Partitions}};
