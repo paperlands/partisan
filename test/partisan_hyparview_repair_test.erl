@@ -122,9 +122,11 @@ cancelled_attempt_cannot_regain_its_license_test() ->
     end).
 
 plumtree_init_reads_watermark_before_names_test() ->
-    {beam_file, _, _, _, _, Functions} = beam_disasm:file(
-        code:which(partisan_plumtree_broadcast)
-    ),
+    %% Under cover `code:which/1' answers `cover_compiled', which has no beam
+    %% file to disassemble. The on-disk artifact is the code cover wrapped.
+    Beam = code:where_is_file(atom_to_list(partisan_plumtree_broadcast) ++ ".beam"),
+    ?assertNotEqual(non_existing, Beam),
+    {beam_file, _, _, _, _, Functions} = beam_disasm:file(Beam),
     {function, init, 1, _, Instructions} = lists:keyfind(init, 2, Functions),
     Reads = lists:filtermap(
         fun(Instruction) ->
