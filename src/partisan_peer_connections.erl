@@ -1199,7 +1199,7 @@ do_dispatch_pid([], _, Node) ->
         error:badarg ->
             {error, notalive}
     end;
-do_dispatch_pid(Connections, PartitionKey, _) ->
+do_dispatch_pid(Connections, PartitionKey, Node) ->
     %% Get the number of elements in the list.
     NumEntries = length(Connections),
 
@@ -1216,8 +1216,15 @@ do_dispatch_pid(Connections, PartitionKey, _) ->
     %% Select that entry from the list.
     Connection = lists:nth(Index, Connections),
 
-    %% Return pid of connection process.
-    {ok, Connection#partisan_peer_connection.pid}.
+    %% Exit handling can lag behind dispatch. Leave registry writes to its owner.
+    case is_process_alive(Connection#partisan_peer_connection.pid) of
+        true ->
+            {ok, Connection#partisan_peer_connection.pid};
+        false ->
+            Live = [Row || #partisan_peer_connection{pid = Pid} = Row <- Connections,
+                           is_process_alive(Pid)],
+            do_dispatch_pid(Live, PartitionKey, Node)
+    end.
 
 %% @private
 do_dispatch(Node, ServerRef, Message, Channel, PartitionKey) when
