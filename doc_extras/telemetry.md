@@ -334,6 +334,43 @@ Fired whenever an inbound `NEIGHBOR` message causes a peer to be added to the ac
 }
 ```
 
+### `[partisan, hyparview, repair, completed]`
+
+Fired once for every client a maintenance attempt actually dials (one per channel and listen address), recording the owner's commit decision for that client. A single attempt can therefore produce several of these; this is not the attempt's fate. `committed` means the owner linked and stored the client; `discarded` means the attempt no longer held its license (superseded, revoked, or the per-channel quota was already met) and the client was killed.
+
+##### Measurements
+```erlang
+#{count => 1}
+```
+
+##### Metadata
+```erlang
+#{
+    attempt => #Ref<0.123.0.1>,
+    peer_node => #{name => 'client@192.168.0.20'},
+    client => <0.412.0>,
+    outcome => committed  % or discarded
+}
+```
+
+### `[partisan, hyparview, repair, outcome]`
+
+Fired exactly once per maintenance attempt, whichever way it ends: `done` when the attempt completed and its message was sent (if the peer was still active), `cancelled` when it was revoked, dial-denied, or its client was discarded, and `{crashed, Reason}` when the worker died before reporting. A crash is also logged at warning level with the same attempt and peer. Use this event for attempt accounting; the sibling `repair, completed` above is the per-client commit decision.
+
+##### Measurements
+```erlang
+#{count => 1}
+```
+
+##### Metadata
+```erlang
+#{
+    attempt => #Ref<0.123.0.1>,
+    peer_node => #{name => 'client@192.168.0.20'},
+    outcome => done  % or cancelled, or {crashed, Reason}
+}
+```
+
 ## Causal messaging events
 
 These events only fire for a broadcast label configured in `causal_labels` (empty, i.e. disabled, by default) — one `partisan_causality_backend` instance runs per configured label.
