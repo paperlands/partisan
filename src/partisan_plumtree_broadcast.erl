@@ -454,10 +454,10 @@ init([Name, Opts]) ->
     schedule_lazy_tick(LazyTickPeriod),
     schedule_exchange_tick(ExchangeTickPeriod),
 
-    %% Membership comes from the oracle's lock-free snapshot; we poll its version
-    %% on each lazy tick to refresh it (no gen_event fan-out — ADR-000001).
-    Members = partisan_membership:node_names(),
+    %% Read the watermark before the names: a concurrent publication must
+    %% remain visible to the next poll, not be marked consumed by init.
     Version = partisan_membership:version(),
+    Members = partisan_membership:node_names(),
 
     %% The tree engine owns the topology and outstanding-lazy state (ADR-000002);
     %% default engine is Plumtree. A raw-dispatch engine (ADR-000004, e.g. Thicket)

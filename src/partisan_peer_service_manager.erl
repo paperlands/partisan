@@ -94,6 +94,7 @@
 %% API
 -export([connect/1]).
 -export([connect/2]).
+-export([connect/3]).
 -export([disconnect/1]).
 -export([disconnect/2]).
 -export([mynode/0]).
@@ -264,19 +265,25 @@ connect(NodeSpec) ->
     (NodeSpec :: partisan:node_spec(), #{prune := false}) ->
         ok.
 
-connect(#{listen_addrs := ListenAddrs} = NodeSpec, #{prune := true}) ->
+connect(NodeSpec, Opts) ->
+    connect(NodeSpec, Opts, fun connect_client/4).
+
+%% The connector owns the effect; the traversal and quotas stay shared.
+connect(#{listen_addrs := ListenAddrs} = NodeSpec, #{prune := true}, Connector) ->
     ToPrune = lists:foldl(
         fun(ListenAddr, Acc) ->
-            maybe_connect(NodeSpec, ListenAddr, Acc)
+            maybe_connect(NodeSpec, ListenAddr, Acc, Connector)
         end,
         [],
         ListenAddrs
     ),
     {ok, ToPrune};
-connect(#{listen_addrs := ListenAddrs} = NodeSpec, #{prune := false}) ->
-    ok = lists:foreach(
+connect(
+    #{listen_addrs := ListenAddrs} = NodeSpec, #{prune := false}, Connector
+) ->
+    lists:foreach(
         fun(ListenAddr) ->
-            maybe_connect(NodeSpec, ListenAddr, ok)
+            maybe_connect(NodeSpec, ListenAddr, ok, Connector)
         end,
         ListenAddrs
     ).
@@ -370,7 +377,7 @@ mynode() ->
 %% @end
 %% -----------------------------------------------------------------------------
 
-maybe_connect(#{name := Node} = NodeSpec, ListenAddr, Acc) ->
+maybe_connect(#{name := Node} = NodeSpec, ListenAddr, Acc, Connector) ->
     Channels =
         case maps:find(channels, NodeSpec) of
             {ok, Value} -> Value;
@@ -398,16 +405,11 @@ maybe_connect(#{name := Node} = NodeSpec, ListenAddr, Acc) ->
 
             %% We start a client which will connect with
             %% partisan_peer_service_server on the peer node
-            Result = partisan_peer_service_client:start_link(
-                NodeSpec, ListenAddr, Channel, ChannelOpts, self()
-            ),
+            Result = Connector(NodeSpec, ListenAddr, Channel, ChannelOpts),
 
             case Result of
                 {ok, Pid} ->
                     ?LOG_DEBUG("Node ~p connected, pid: ~p", [NodeSpec, Pid]),
-                    ok = partisan_peer_connections:store(
-                        NodeSpec, Pid, Channel, ListenAddr
-                    ),
                     Acc;
                 ignore ->
                     ?LOG_DEBUG(#{
@@ -434,7 +436,7 @@ maybe_connect(#{name := Node} = NodeSpec, ListenAddr, Acc) ->
             %% Found node with some channels already connected, we will try to
             %% complete the parallelism per channel across all channels
             ChannelsList = maps:to_list(Channels),
-            maybe_connect(ChannelsList, NodeSpec, ListenAddr, Acc)
+            maybe_connect(ChannelsList, NodeSpec, ListenAddr, Acc, Connector)
     end.
 
 %% -----------------------------------------------------------------------------
@@ -444,7 +446,9 @@ maybe_connect(#{name := Node} = NodeSpec, ListenAddr, Acc) ->
 %% @end
 %% -----------------------------------------------------------------------------
 
-maybe_connect([{Channel, ChannelOpts} | T], NodeSpec, ListenAddr, Acc) ->
+maybe_connect(
+    [{Channel, ChannelOpts} | T], NodeSpec, ListenAddr, Acc, Connector
+) ->
     %% There is at least one connection for Node.
     Parallelism = get_opt(parallelism, ChannelOpts),
 
@@ -458,17 +462,12 @@ maybe_connect([{Channel, ChannelOpts} | T], NodeSpec, ListenAddr, Acc) ->
 
                 %% Count might be == 0, but we try to connect anyway and we deal
                 %% with that case below.
-                Result = partisan_peer_service_client:start_link(
-                    NodeSpec, ListenAddr, Channel, ChannelOpts, self()
-                ),
+                Result = Connector(NodeSpec, ListenAddr, Channel, ChannelOpts),
 
                 case Result of
                     {ok, Pid} ->
                         ?LOG_DEBUG(
                             "Node ~p connected, pid: ~p", [NodeSpec, Pid]
-                        ),
-                        ok = partisan_peer_connections:store(
-                            NodeSpec, Pid, Channel, ListenAddr
                         ),
                         Acc;
                     {error, Reason} when Count == 0 ->
@@ -501,9 +500,24 @@ maybe_connect([{Channel, ChannelOpts} | T], NodeSpec, ListenAddr, Acc) ->
     %% current channel. We will try on the next tick.
     %% It is fairer this way, so that we can get connections one channel at a
     %% time.
-    maybe_connect(T, NodeSpec, ListenAddr, NewAcc);
-maybe_connect([], _, _, Acc) ->
+    maybe_connect(T, NodeSpec, ListenAddr, NewAcc, Connector);
+maybe_connect([], _, _, Acc, _) ->
     Acc.
+
+connect_client(NodeSpec, ListenAddr, Channel, ChannelOpts) ->
+    case
+        partisan_peer_service_client:start_link(
+            NodeSpec, ListenAddr, Channel, ChannelOpts, self()
+        )
+    of
+        {ok, Pid} = Result ->
+            ok = partisan_peer_connections:store(
+                NodeSpec, Pid, Channel, ListenAddr
+            ),
+            Result;
+        Error ->
+            Error
+    end.
 
 %% @private
 maybe_stale(_, _, _, ok = Acc, 0, _) ->
@@ -614,7 +628,6 @@ do_deliver(ServerRef, Message) ->
             }),
             ok
     end.
-
 
 %% -----------------------------------------------------------------------------
 %% @private

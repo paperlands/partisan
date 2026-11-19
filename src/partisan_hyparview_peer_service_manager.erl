@@ -146,10 +146,14 @@ add-to-passive, promotion, symmetry maintenance) below them.
     epoch :: epoch(),
     sent_message_map :: message_id_store(),
     recv_message_map :: message_id_store(),
-    partitions :: partisan_peer_service_manager:partitions()
+    partitions :: partisan_peer_service_manager:partitions(),
+    repair = undefined :: repair()
 }).
 
 -type t() :: #state{}.
+-type repair() :: undefined
+    | {reference(), pid(), partisan:node_spec()}
+    | {cancelled, pid()}.
 -type active() :: sets:set(partisan:node_spec()).
 -type passive() :: sets:set(partisan:node_spec()).
 -type reserved() :: #{atom() := partisan:node_spec()}.
@@ -754,21 +758,24 @@ init([]) ->
 -spec handle_call(call(), {pid(), term()}, t()) ->
     {reply, term(), t()}.
 
-handle_call(partitions, _From, State) ->
+handle_call(Event, From, State) ->
+    finish_event(handle_call_event(Event, From, State)).
+
+handle_call_event(partitions, _From, State) ->
     {reply, {ok, State#state.partitions}, State};
-handle_call({leave, Node}, _From, State0) ->
+handle_call_event({leave, Node}, _From, State0) ->
     {Reply, State} = do_leave(Node, State0),
     {reply, Reply, State};
-handle_call({join, #{name := _Name} = Node}, _From, State) ->
+handle_call_event({join, #{name := _Name} = Node}, _From, State) ->
     gen_server:cast(?MODULE, {join, Node}),
     {reply, ok, State};
-handle_call({update_members, Members}, _, #state{} = State0) ->
+handle_call_event({update_members, Members}, _, #state{} = State0) ->
     State = handle_update_members(Members, State0),
     {reply, ok, State};
-handle_call({resolve_partition, Reference}, _From, State) ->
+handle_call_event({resolve_partition, Reference}, _From, State) ->
     Partitions = handle_partition_resolution(Reference, State),
     {reply, ok, State#state{partitions = Partitions}};
-handle_call({inject_partition, Origin, TTL}, _From, State) ->
+handle_call_event({inject_partition, Origin, TTL}, _From, State) ->
     Myself = State#state.node_spec,
     Reference = make_ref(),
 
@@ -798,7 +805,7 @@ handle_call({inject_partition, Origin, TTL}, _From, State) ->
                     {reply, {ok, Reference}, State}
             end
     end;
-handle_call({reserve, Tag}, _From, State) ->
+handle_call_event({reserve, Tag}, _From, State) ->
     Reserved0 = State#state.reserved,
     ActiveMaxSize = config_get(active_max_size, State),
     Present = maps:keys(Reserved0),
@@ -816,9 +823,9 @@ handle_call({reserve, Tag}, _From, State) ->
         false ->
             {reply, {error, no_available_slots}, State}
     end;
-handle_call(active, _From, State) ->
+handle_call_event(active, _From, State) ->
     {reply, {ok, State#state.active}, State};
-handle_call({active, Tag}, _From, State) ->
+handle_call_event({active, Tag}, _From, State) ->
     Result =
         case maps:find(Tag, State#state.reserved) of
             {ok, #{name := Peer}} ->
@@ -829,12 +836,12 @@ handle_call({active, Tag}, _From, State) ->
                 error
         end,
     {reply, Result, State};
-handle_call(passive, _From, State) ->
+handle_call_event(passive, _From, State) ->
     {reply, {ok, State#state.passive}, State};
-handle_call({send_message, Name, Msg}, _From, State) ->
+handle_call_event({send_message, Name, Msg}, _From, State) ->
     Result = do_send_message(Name, Msg),
     {reply, Result, State};
-handle_call({forward_message, Name, ServerRef, Msg, Opts}, _From, State) ->
+handle_call_event({forward_message, Name, ServerRef, Msg, Opts}, _From, State) ->
     Partitions = State#state.partitions,
     IsPartitioned = lists:any(
         fun({_, #{name := N}}) ->
@@ -858,7 +865,7 @@ handle_call({forward_message, Name, ServerRef, Msg, Opts}, _From, State) ->
             ),
             {reply, Result, State}
     end;
-handle_call({receive_message, _, _, _} = Cmd, _From, State) ->
+handle_call_event({receive_message, _, _, _} = Cmd, _From, State) ->
     %% This is important, we immediately cast the message to ourselves to
     %% unblock the calling process (partisan_peer_service_server who manages
     %% the socket).
@@ -868,7 +875,7 @@ handle_call({receive_message, _, _, _} = Cmd, _From, State) ->
     %% See Issue #5
     gen_server:cast(?MODULE, Cmd),
     {reply, ok, State};
-handle_call(members, _From, State) ->
+handle_call_event(members, _From, State) ->
     Active = State#state.active,
     Members = members(Active),
 
@@ -881,13 +888,13 @@ handle_call(members, _From, State) ->
     Nodes = [Node || #{name := Node} <- Members],
 
     {reply, {ok, Nodes}, State};
-handle_call(members_for_orchestration, _From, State) ->
+handle_call_event(members_for_orchestration, _From, State) ->
     {reply, {ok, members(State)}, State};
-handle_call(get_local_state, _From, State) ->
+handle_call_event(get_local_state, _From, State) ->
     Active = State#state.active,
     Epoch = State#state.epoch,
     {reply, {ok, {state, Active, Epoch}}, State};
-handle_call(connections, _From, State) ->
+handle_call_event(connections, _From, State) ->
     %% get a list of all the client connections to the various peers of the
     %% active view
     Cs = lists:map(
@@ -903,16 +910,19 @@ handle_call(connections, _From, State) ->
         peers(State)
     ),
     {reply, {ok, Cs}, State};
-handle_call(refresh_node_spec, _From, State0) ->
+handle_call_event(refresh_node_spec, _From, State0) ->
     {Reply, State} = do_refresh_node_spec(State0),
     {reply, Reply, State};
-handle_call(Event, _From, State) ->
+handle_call_event(Event, _From, State) ->
     ?LOG_WARNING(#{description => "Unhandled call event", event => Event}),
     {reply, ok, State}.
 
 -spec handle_cast(cast(), t()) -> {noreply, t()}.
 
-handle_cast({join, Peer}, State) ->
+handle_cast(Event, State) ->
+    finish_event(handle_cast_event(Event, State)).
+
+handle_cast_event({join, Peer}, State) ->
     Myself = State#state.node_spec,
     Tag = State#state.tag,
     Epoch = State#state.epoch,
@@ -930,9 +940,9 @@ handle_cast({join, Peer}, State) ->
     %% REVIEW we currently ignore errors, shouldn't we return them?
     _ = do_send_message(Peer, {join, Myself, Tag, Epoch}),
     {noreply, State};
-handle_cast({receive_message, _Peer, Channel, Message}, State) ->
+handle_cast_event({receive_message, _Peer, Channel, Message}, State) ->
     handle_message(Message, Channel, State);
-handle_cast({disconnect, Peer}, State0) ->
+handle_cast_event({disconnect, Peer}, State0) ->
     Active0 = State0#state.active,
 
     case sets:is_element(Peer, Active0) of
@@ -948,13 +958,69 @@ handle_cast({disconnect, Peer}, State0) ->
         false ->
             {noreply, State0}
     end;
-handle_cast(Event, State) ->
+handle_cast_event(Event, State) ->
     ?LOG_WARNING(#{description => "Unhandled cast event", event => Event}),
     {noreply, State}.
 
 -spec handle_info(term(), t()) -> {noreply, t()}.
 
-handle_info(random_promotion, State0) ->
+handle_info(Event, State) ->
+    finish_event(handle_info_event(Event, State)).
+
+handle_info_event({repair_finished, Ref, Worker, Peer, Message}, State) ->
+    case State#state.repair of
+        {Ref, Worker, Peer} ->
+            case sets:is_element(Peer, State#state.active) of
+                true -> do_send_message(Peer, Message);
+                false -> ok
+            end;
+        _ ->
+            ok
+    end,
+    {noreply, State};
+handle_info_event({repair_dial, Ref, Worker}, State) ->
+    case State#state.repair of
+        {Ref, Worker, Peer} ->
+            Worker !
+                {repair_dial, Ref, sets:is_element(Peer, State#state.active)};
+        _ ->
+            Worker ! {repair_dial, Ref, false}
+    end,
+    {noreply, State};
+handle_info_event(
+    {repair_connected, Ref, Worker, Peer, Pid, Channel, Addr, Opts}, State
+) ->
+    Current = State#state.repair =:= {Ref, Worker, Peer},
+    Wanted = sets:is_element(Peer, State#state.active),
+    Limit = maps:get(parallelism, Opts, partisan_config:parallelism()),
+    Needed = partisan_peer_connections:count(Peer, Channel) < Limit,
+    Outcome =
+        case
+            Current andalso Wanted andalso Needed andalso is_process_alive(Pid)
+        of
+            true ->
+                link(Pid),
+                ok = partisan_peer_connections:store(Peer, Pid, Channel, Addr),
+                committed;
+            false ->
+                discarded
+        end,
+    Worker ! {repair_commit, Ref, Pid, Outcome},
+    partisan_telemetry:execute(
+        [partisan, hyparview, repair, completed],
+        #{count => 1},
+        #{attempt => Ref, peer_node => Peer, client => Pid, outcome => Outcome}
+    ),
+    {noreply, State};
+handle_info_event(
+    {'EXIT', Worker, _Reason}, #state{repair = {_, Worker, _}} = State
+) ->
+    {noreply, State#state{repair = undefined}};
+handle_info_event(
+    {'EXIT', Worker, _Reason}, #state{repair = {cancelled, Worker}} = State
+) ->
+    {noreply, State#state{repair = undefined}};
+handle_info_event(random_promotion, State0) ->
     Myself = State0#state.node_spec,
     Active0 = State0#state.active,
     Passive = State0#state.passive,
@@ -977,7 +1043,7 @@ handle_info(random_promotion, State0) ->
     schedule_random_promotion(State),
 
     {noreply, State};
-handle_info(tree_refresh, State) ->
+handle_info_event(tree_refresh, State) ->
     %% Get lazily computed outlinks.
     OutLinks = retrieve_outlinks(State#state.name),
 
@@ -985,7 +1051,7 @@ handle_info(tree_refresh, State) ->
     schedule_tree_refresh(State),
 
     {noreply, State#state{out_links = OutLinks}};
-handle_info(passive_view_maintenance, State0) ->
+handle_info_event(passive_view_maintenance, State0) ->
     %% The passive view is maintained using a cyclic strategy. Periodically,
     %% each node perform a shuffle operation with one of its peers at random.
     %% The purpose of the shuffle operation is to update the passive views of
@@ -1006,21 +1072,15 @@ handle_info(passive_view_maintenance, State0) ->
             undefined ->
                 State0;
             Peer ->
-                %% Trigger connection.
-                ok = partisan_peer_service_manager:connect(Peer),
-
-                %% Forward shuffle request.
                 ARWL = config_get(active_rwl, State0),
-                do_send_message(Peer, {shuffle, Exchange, ARWL, Myself}),
-
-                State0
+                start_repair(Peer, {shuffle, Exchange, ARWL, Myself}, State0)
         end,
 
     %% Reschedule.
     schedule_passive_view_maintenance(State),
 
     {noreply, State};
-handle_info(active_view_maintenance, State0) ->
+handle_info_event(active_view_maintenance, State0) ->
     %% Repair active-view symmetry. HyParView requires that if node A holds peer
     %% B in its active view then B holds A as well. During churn a NEIGHBOR can
     %% race a not-yet-established reverse connection: the receiver's is_connected
@@ -1061,7 +1121,7 @@ handle_info(active_view_maintenance, State0) ->
 
     {noreply, State0};
 % handle optimization using xbot algorithm
-handle_info(xbot_execution, #state{} = State) ->
+handle_info_event(xbot_execution, #state{} = State) ->
     Active = State#state.active,
     Passive = State#state.passive,
     Reserved = State#state.reserved,
@@ -1081,7 +1141,7 @@ handle_info(xbot_execution, #state{} = State) ->
     %In any case, schedule periodic xbot execution algorithm (optimization)
     ok = schedule_xbot_execution(State),
     {noreply, State};
-handle_info({'EXIT', Pid, Reason}, State0) when is_pid(Pid) ->
+handle_info_event({'EXIT', Pid, Reason}, State0) when is_pid(Pid) ->
     ?LOG_DEBUG(#{
         description => "Active view connection process died.",
         process => Pid,
@@ -1110,7 +1170,7 @@ handle_info({'EXIT', Pid, Reason}, State0) when is_pid(Pid) ->
         error:badarg ->
             {noreply, State0}
     end;
-handle_info(
+handle_info_event(
     {connected, Peer, _Channel, _Tag, _PeerEpoch, _RemoteState}, State
 ) ->
     ?LOG_DEBUG(#{
@@ -1119,18 +1179,25 @@ handle_info(
     }),
 
     {noreply, State};
-handle_info(Event, State) ->
+handle_info_event(Event, State) ->
     ?LOG_WARNING(#{description => "Unhandled info event", event => Event}),
     {noreply, State}.
 
 -spec terminate(term(), t()) -> term().
 
-terminate(_Reason, _State) ->
+terminate(_Reason, State) ->
+    case State#state.repair of
+        undefined -> ok;
+        {cancelled, Worker} -> exit(Worker, shutdown);
+        {_, Worker, _} -> exit(Worker, shutdown)
+    end,
     ok = partisan_peer_connections:kill_all().
 
 -spec code_change(term() | {down, term()}, t(), term()) ->
     {ok, t()}.
 
+code_change(_OldVsn, State, _Extra) when tuple_size(State) =:= 13 ->
+    {ok, list_to_tuple(tuple_to_list(State) ++ [undefined])};
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
@@ -1139,6 +1206,67 @@ code_change(_OldVsn, State, _Extra) ->
 %% =============================================================================
 
 %% @private
+finish_event({reply, Reply, State}) ->
+    {reply, Reply, reconcile_repair(State)};
+finish_event({noreply, State}) ->
+    {noreply, reconcile_repair(State)}.
+
+%% Revocation survives an identical spec being re-admitted later.
+%% reconnect-deferred-maintenance
+reconcile_repair(#state{repair = {_, Worker, Peer}} = State) ->
+    case sets:is_element(Peer, State#state.active) of
+        true -> State;
+        false -> State#state{repair = {cancelled, Worker}}
+    end;
+reconcile_repair(State) ->
+    State.
+
+%% One maintenance worker globally; connection traversal and quotas remain shared.
+start_repair(Peer, Message, #state{repair = undefined} = State) ->
+    Owner = self(),
+    Ref = make_ref(),
+    Worker = spawn_link(fun() -> repair_connect(Owner, Ref, Peer, Message) end),
+    State#state{repair = {Ref, Worker, Peer}};
+start_repair(_, _, State) ->
+    State.
+
+repair_connect(Owner, Ref, Peer, Message) ->
+    Connector = fun(Spec, Addr, Channel, Opts) ->
+        Owner ! {repair_dial, Ref, self()},
+        receive
+            {repair_dial, Ref, true} -> ok;
+            {repair_dial, Ref, false} -> throw(cancelled)
+        end,
+        case
+            partisan_peer_service_client:start_link(
+                Spec, Addr, Channel, Opts, Owner
+            )
+        of
+            {ok, Pid} = Result ->
+                Owner !
+                    {repair_connected, Ref, self(), Spec, Pid, Channel, Addr,
+                        Opts},
+                receive
+                    {repair_commit, Ref, Pid, committed} ->
+                        unlink(Pid),
+                        Result;
+                    {repair_commit, Ref, Pid, discarded} ->
+                        unlink(Pid),
+                        exit(Pid, shutdown),
+                        throw(cancelled)
+                end;
+            Error ->
+                Error
+        end
+    end,
+    try
+        ok = partisan_peer_service_manager:connect(
+            Peer, #{prune => false}, Connector
+        ),
+        Owner ! {repair_finished, Ref, self(), Peer, Message}
+    catch
+        throw:cancelled -> ok
+    end.
 handle_message({resolve_partition, Reference}, _, State) ->
     Partitions = handle_partition_resolution(Reference, State),
     {noreply, State#state{partitions = Partitions}};
@@ -1322,7 +1450,7 @@ handle_message(
     %% here and are no-ops for peers we already hold; firing an event every
     %% round would needlessly wake downstream subscribers (e.g. anti-entropy).
     _ =
-        case same_set(State#state.active, State0#state.active) of
+        case not same_set(State#state.active, State0#state.active) of
             true ->
                 %% This handler serves both a peer's first NEIGHBOR (a genuine
                 %% join) and a periodic symmetry re-assertion
