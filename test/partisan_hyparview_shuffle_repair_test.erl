@@ -62,9 +62,9 @@ refresh_before_completion_sends_current_self() ->
         after 1000 -> error(no_shuffle_completion)
         end
     after
-        catch gen_server:stop(Mgr),
-        catch gen_server:stop(Holder),
-        catch ets:delete(partisan_membership)
+        stop_quietly(Mgr),
+        stop_quietly(Holder),
+        delete_membership_table()
     end,
     ok.
 
@@ -99,11 +99,17 @@ is_config_key(_) -> false.
 reset_membership_table() ->
     case ets:info(partisan_membership, name) of
         undefined -> ok;
-        _ -> catch ets:delete(partisan_membership)
+        _ -> delete_membership_table()
     end,
     _ = ets:new(partisan_membership, [named_table, public, set]),
     true = ets:insert(partisan_membership, [{version, 0}, {members, []}]),
     ok.
+
+stop_quietly(Pid) ->
+    try gen_server:stop(Pid) catch _:_ -> exit(Pid, kill) end.
+
+delete_membership_table() ->
+    try ets:delete(partisan_membership) catch _:_ -> ok end.
 
 init([Parent]) ->
     {ok, Parent}.

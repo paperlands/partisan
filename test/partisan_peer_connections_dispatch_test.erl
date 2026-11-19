@@ -136,7 +136,7 @@ known_dead_row_redispatch() ->
     after
         stop_quietly(Owner),
         [stop_quietly(Holder) || Holder <- Holders],
-        catch ets:delete(partisan_membership)
+        delete_membership_table()
     end,
     ok.
 
@@ -174,7 +174,7 @@ is_config_key(_) -> false.
 reset_membership_table() ->
     case ets:info(partisan_membership, name) of
         undefined -> ok;
-        _ -> catch ets:delete(partisan_membership)
+        _ -> delete_membership_table()
     end,
     _ = ets:new(partisan_membership, [named_table, public, set]),
     true = ets:insert(partisan_membership, [{version, 0}, {members, []}]),
@@ -186,6 +186,9 @@ stop_quietly(Pid) ->
     catch
         _:_ -> exit(Pid, kill)
     end.
+
+delete_membership_table() ->
+    try ets:delete(partisan_membership) catch _:_ -> ok end.
 
 init([Parent]) ->
     {ok, Parent}.
