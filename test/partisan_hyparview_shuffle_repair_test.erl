@@ -28,15 +28,23 @@ run() ->
     try
         Old = partisan:node_spec(),
         PeerAddr = #{ip => {127, 0, 0, 1}, port => 32552},
-        Peer = #{name => shuffle_review_peer, listen_addrs => [PeerAddr], channels => #{}},
+        Peer = #{
+            name => shuffle_review_peer,
+            listen_addrs => [PeerAddr],
+            channels => #{}
+        },
         Ref = make_ref(),
         %% A dialed attempt waiting for completion, with the target admitted.
         _ = sys:replace_state(Mgr, fun(State) ->
             true = link(Holder),
-            ok = partisan_peer_connections:store(Peer, Holder, undefined, PeerAddr),
+            ok = partisan_peer_connections:store(
+                Peer, Holder, undefined, PeerAddr
+            ),
             Active = sets:add_element(Peer, element(5, State)),
             setelement(
-                tuple_size(State), setelement(5, State, Active), {Ref, Holder, Peer}
+                tuple_size(State),
+                setelement(5, State, Active),
+                {Ref, Holder, Peer}
             )
         end),
         NewAddr = #{ip => {127, 0, 0, 1}, port => 32553},
@@ -66,7 +74,6 @@ run() ->
         partisan_test_config:delete_membership_table()
     end,
     ok.
-
 
 init([Parent]) ->
     {ok, Parent}.

@@ -1221,8 +1221,11 @@ do_dispatch_pid(Connections, PartitionKey, Node) ->
         true ->
             {ok, Connection#partisan_peer_connection.pid};
         false ->
-            Live = [Row || #partisan_peer_connection{pid = Pid} = Row <- Connections,
-                           is_process_alive(Pid)],
+            Live = [
+                Row
+             || #partisan_peer_connection{pid = Pid} = Row <- Connections,
+                is_process_alive(Pid)
+            ],
             do_dispatch_pid(Live, PartitionKey, Node)
     end.
 

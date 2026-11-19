@@ -18,7 +18,10 @@ with_snapshot(Fun) ->
     end.
 
 snapshot() ->
-    Terms = [{Key, Value} || {Key, Value} <- persistent_term:get(), is_config_key(Key)],
+    Terms = [
+        {Key, Value}
+     || {Key, Value} <- persistent_term:get(), is_config_key(Key)
+    ],
     {Terms, application:get_all_env(partisan)}.
 
 restore({Terms, Env}) ->
@@ -47,7 +50,15 @@ reset_membership_table() ->
     ok.
 
 delete_membership_table() ->
-    try ets:delete(partisan_membership) catch _:_ -> ok end.
+    try
+        ets:delete(partisan_membership)
+    catch
+        _:_ -> ok
+    end.
 
 stop_quietly(Pid) ->
-    try gen_server:stop(Pid) catch _:_ -> exit(Pid, kill) end.
+    try
+        gen_server:stop(Pid)
+    catch
+        _:_ -> exit(Pid, kill)
+    end.

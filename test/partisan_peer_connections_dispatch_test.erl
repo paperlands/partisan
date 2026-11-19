@@ -10,7 +10,9 @@
 -define(M, partisan_hyparview_peer_service_manager).
 
 known_dead_row_redispatch_test_() ->
-    {timeout, 60, fun() -> partisan_test_config:with_snapshot(fun known_dead_row_redispatch/0) end}.
+    {timeout, 60, fun() ->
+        partisan_test_config:with_snapshot(fun known_dead_row_redispatch/0)
+    end}.
 
 known_dead_row_redispatch() ->
     {ok, _} = application:ensure_all_started(telemetry),
@@ -51,7 +53,11 @@ known_dead_row_redispatch() ->
                 fun({Name, Pid, Channel, Addr}) ->
                     true = link(Pid),
                     ok = ?R:store(
-                        #{name => Name, listen_addrs => [Addr], channels => #{}},
+                        #{
+                            name => Name,
+                            listen_addrs => [Addr],
+                            channels => #{}
+                        },
                         Pid,
                         Channel,
                         Addr
@@ -67,14 +73,19 @@ known_dead_row_redispatch() ->
         ?assert(
             lists:all(
                 fun(K) ->
-                    {ok, lists:nth(K + 1, Order)} =:= ?R:dispatch_pid(mixed_fixture, data, K)
+                    {ok, lists:nth(K + 1, Order)} =:=
+                        ?R:dispatch_pid(mixed_fixture, data, K)
                 end,
                 Keys
             )
         ),
-        ?assertEqual({ok, Default}, ?R:dispatch_pid(default_fixture, control, 0)),
+        ?assertEqual(
+            {ok, Default}, ?R:dispatch_pid(default_fixture, control, 0)
+        ),
         ok = partisan_config:set(channel_fallback, false),
-        ?assertEqual({error, disconnected}, ?R:dispatch_pid(default_fixture, control, 0)),
+        ?assertEqual(
+            {error, disconnected}, ?R:dispatch_pid(default_fixture, control, 0)
+        ),
         ok = partisan_config:set(channel_fallback, true),
         ok = sys:suspend(Owner),
         try
@@ -82,50 +93,70 @@ known_dead_row_redispatch() ->
             exit_and_wait(OtherOld),
             %% The owner is suspended: both dead rows are still indexed.
             ?assert(
-                lists:member(Old, [?R:pid(Row) || Row <- ?R:connections(mixed_fixture, data)])
+                lists:member(Old, [
+                    ?R:pid(Row)
+                 || Row <- ?R:connections(mixed_fixture, data)
+                ])
             ),
             ?assert(
                 lists:member(OtherOld, [
-                    ?R:pid(Row) || Row <- ?R:connections(default_fixture, data)
+                    ?R:pid(Row)
+                 || Row <- ?R:connections(default_fixture, data)
                 ])
             ),
             ok = partisan_config:set(forward_options, #{partition_key => OldKey}),
             ?assertEqual(
                 ok,
-                ?R:dispatch({
-                    forward_message,
-                    mixed_fixture,
-                    probe_receiver,
-                    fixture_one,
-                    #{channel => data}
-                })
+                ?R:dispatch(
+                    {
+                        forward_message,
+                        mixed_fixture,
+                        probe_receiver,
+                        fixture_one,
+                        #{channel => data}
+                    }
+                )
             ),
-            ?assertEqual([], ?R:dispatch_many([mixed_fixture], probe_receiver, fixture_many, data)),
+            ?assertEqual(
+                [],
+                ?R:dispatch_many(
+                    [mixed_fixture], probe_receiver, fixture_many, data
+                )
+            ),
             ?assertEqual(
                 ok,
-                ?R:dispatch({
-                    forward_message,
-                    mixed_fixture,
-                    undefined,
-                    OldKey,
-                    probe_receiver,
-                    fixture_keyed,
-                    #{channel => data}
-                })
+                ?R:dispatch(
+                    {
+                        forward_message,
+                        mixed_fixture,
+                        undefined,
+                        OldKey,
+                        probe_receiver,
+                        fixture_keyed,
+                        #{channel => data}
+                    }
+                )
             ),
             %% Actual payloads, not just return values, reach the live replacement.
             ?assertEqual(
-                [fixture_keyed, fixture_many, fixture_one], lists:sort(drain(New, 3, []))
+                [fixture_keyed, fixture_many, fixture_one],
+                lists:sort(drain(New, 3, []))
             ),
-            ?assertEqual({ok, New}, ?R:dispatch_pid(mixed_fixture, data, OldKey)),
+            ?assertEqual(
+                {ok, New}, ?R:dispatch_pid(mixed_fixture, data, OldKey)
+            ),
             ?assert(
                 lists:all(
-                    fun(_) -> {ok, New} =:= ?R:dispatch_pid(mixed_fixture, data) end,
+                    fun(_) ->
+                        {ok, New} =:= ?R:dispatch_pid(mixed_fixture, data)
+                    end,
                     lists:seq(1, 32)
                 )
             ),
             %% Exact-channel dispatch does not expand into the default channel.
-            ?assertEqual({error, disconnected}, ?R:dispatch_pid(default_fixture, data, 0))
+            ?assertEqual(
+                {error, disconnected}, ?R:dispatch_pid(default_fixture, data, 0)
+            )
         after
             ok = sys:resume(Owner)
         end,
@@ -140,7 +171,6 @@ known_dead_row_redispatch() ->
     end,
     ok.
 
-
 init([Parent]) ->
     {ok, Parent}.
 
@@ -148,7 +178,9 @@ handle_call(_, _, Parent) ->
     {reply, ok, Parent}.
 
 handle_cast({send_encoded, Data}, Parent) ->
-    {forward_message, probe_receiver, Message} = binary_to_term(iolist_to_binary(Data)),
+    {forward_message, probe_receiver, Message} = binary_to_term(
+        iolist_to_binary(Data)
+    ),
     Parent ! {received, self(), Message},
     {noreply, Parent}.
 
@@ -174,7 +206,11 @@ drain(Pid, N, Acc) ->
 await_prune(_Name, _Pid, 0) ->
     timeout;
 await_prune(Name, Pid, Tries) ->
-    case lists:any(fun(Row) -> ?R:pid(Row) =:= Pid end, ?R:connections(Name, data)) of
+    case
+        lists:any(
+            fun(Row) -> ?R:pid(Row) =:= Pid end, ?R:connections(Name, data)
+        )
+    of
         false ->
             ok;
         true ->
