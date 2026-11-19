@@ -971,7 +971,7 @@ handle_info_event({repair_finished, Ref, Worker, Peer, Message}, State) ->
     case State#state.repair of
         {Ref, Worker, Peer} ->
             case sets:is_element(Peer, State#state.active) of
-                true -> do_send_message(Peer, Message);
+                true -> do_send_message(Peer, repair_message(Message, State));
                 false -> ok
             end;
         _ ->
@@ -1229,6 +1229,15 @@ start_repair(Peer, Message, #state{repair = undefined} = State) ->
     State#state{repair = {Ref, Worker, Peer}};
 start_repair(_, _, State) ->
     State.
+
+%% @private
+%% The tick captures its exchange before the dial; self can be replaced by a
+%% NEIGHBOR while the target stays active. Rebuild the envelope from current
+%% state so a licensed completion never sends a superseded self spec.
+repair_message({shuffle, _Exchange, TTL, _Myself}, State) ->
+    {shuffle, select_peers_for_exchange(State), TTL, State#state.node_spec};
+repair_message(Message, _State) ->
+    Message.
 
 repair_connect(Owner, Ref, Peer, Message) ->
     Connector = fun(Spec, Addr, Channel, Opts) ->
