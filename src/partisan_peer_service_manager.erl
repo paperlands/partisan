@@ -268,7 +268,25 @@ connect(NodeSpec) ->
 connect(NodeSpec, Opts) ->
     connect(NodeSpec, Opts, fun connect_client/4).
 
-%% The connector owns the effect; the traversal and quotas stay shared.
+-type connector() ::
+    fun(
+        (
+            partisan:node_spec(),
+            partisan:listen_addr(),
+            partisan:channel(),
+            partisan:channel_opts()
+        ) ->
+            {ok, pid()} | ignore | {error, term()}
+    ).
+
+%% @doc Traverse `NodeSpec''s listen addresses, delegating every attempt to
+%% `Connector'. The traversal, quota and stale-spec bookkeeping stay shared, so
+%% a caller can own the connection effect without duplicating `connect/2'.
+-spec connect(
+    NodeSpec :: partisan:node_spec(),
+    Opts :: #{prune := boolean()},
+    Connector :: connector()
+) -> ok | {ok, StaleSpecs :: [partisan:node_spec()]}.
 connect(#{listen_addrs := ListenAddrs} = NodeSpec, #{prune := true}, Connector) ->
     ToPrune = lists:foldl(
         fun(ListenAddr, Acc) ->
